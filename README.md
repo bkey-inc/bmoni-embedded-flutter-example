@@ -1,0 +1,164 @@
+<div align="center">
+
+# 🪙 BMoni Embedded — Flutter Example
+
+**A reference Flutter client for the BMoni Embedded Proxy API.**
+
+Create a user, provision a managed smart wallet, complete KYC, move money across
+fiat & crypto rails, and exercise every regional ramp — with the on-device
+[`bmoni_embedded_sdk`](https://pub.dev/packages/bmoni_embedded_sdk) handling keys
+and signing.
+
+<br/>
+
+![Flutter](https://img.shields.io/badge/Flutter-3.44-02569B?logo=flutter&logoColor=white)
+![Dart](https://img.shields.io/badge/Dart-%5E3.11-0175C2?logo=dart&logoColor=white)
+![Platform](https://img.shields.io/badge/platform-iOS%20%7C%20Android-lightgrey)
+![Status](https://img.shields.io/badge/status-reference%20example-c026d3)
+![License](https://img.shields.io/badge/license-private-555)
+
+</div>
+
+---
+
+## 📸 Screenshots
+
+<table>
+  <tr>
+    <td align="center" width="33%">
+      <img src="docs/screenshots/01-create-account.png" width="220" alt="Create account" /><br/>
+      <sub><b>Configure & create</b></sub>
+    </td>
+    <td align="center" width="33%">
+      <img src="docs/screenshots/02-wallet-home.png" width="220" alt="Wallet home" /><br/>
+      <sub><b>Wallet home</b></sub>
+    </td>
+    <td align="center" width="33%">
+      <img src="docs/screenshots/03-integrations.png" width="220" alt="Integrations" /><br/>
+      <sub><b>Integrations</b></sub>
+    </td>
+  </tr>
+</table>
+
+> `02` and `03` are placeholders — drop real captures into `docs/screenshots/`
+> (same file names) to replace them.
+
+---
+
+## ✨ What it shows
+
+A single guided flow, end to end:
+
+| Step | API |
+| :--- | :--- |
+| 👤 Create a user | `POST /v1/users` |
+| 💳 Provision a managed smart wallet | `owner-proof-challenges` → sign EIP-191 → `create-managed` |
+| 🪪 Complete KYC | options · occupations · document uploads · Bridge ToS · `activate` |
+| 💰 Top up | crypto (`deposit/wallet`) or bank rail (US VBA / regional deposit account) |
+| 🏦 Withdraw | crypto offramp · US ACH · Nigeria bank |
+| 🔁 Swap | `exchange/convert` rate preview |
+| 🧩 Integrations | the regional/provider ramps (below) |
+
+> [!NOTE]
+> **This is a demo, not production.** It favours clarity over polish — one
+> `lib/main.dart`, raw JSON response panels, minimal state. Use it as a contract
+> reference for your own integration.
+
+---
+
+## 📂 What's inside
+
+```text
+lib/main.dart        # the entire example — UI + ProxyApiClient + models
+docs/screenshots/    # images used in this README
+```
+
+`lib/main.dart` is intentionally one file, in three parts:
+
+| Part | Role |
+| :--- | :--- |
+| **`ProxyApiClient`** | A thin, typed HTTP client over every proxy endpoint — the single source of truth for request/response shapes. |
+| **`_ExampleHomePageState`** | The guided flow: config → create account → currency → smart wallet → wallet home → KYC wizard. |
+| **Models & widgets** | `SmartWallet`, `ProxyUser`, and small reusable widgets (`_SectionCard`, `_TextInput`, `_LastResponsePanel`, …). |
+
+---
+
+## 🧩 Integrations screen
+
+Open **Explore integrations** from the wallet home. One section per provider —
+each calls the proxy and dumps the raw response. Flows that return a
+`signatureRequest` expose a **Sign & submit** button that signs `hashToSign`
+with `BmoniEmbeddedSdk.signTransactionHash(...)` and completes via the matching
+endpoint.
+
+| Integration | Endpoints |
+| :--- | :--- |
+| 🔁 **Swap quote** | `GET exchange/rate/:from/:to` · `POST exchange/quote` |
+| 🇪🇺 **EU SEPA / Monerium** | `POST eu/kyc` · `eu/orders/prepare` · `eu/orders/complete` · `eu/files` |
+| 💵 **LATAM cash** (Pago46) | `POST latam/cash/orders/{fund,send}` · `GET latam/cash/orders[/:id]` |
+| 🇲🇽 **LATAM Mexico** (Etherfuse) | `latam/mx/kyc/{activate,status,bank-account}` · `latam/mx/quote` · `latam/mx/orders[/:id]` |
+| 🇺🇸 **US virtual bank account** | `GET us/vba/readiness` · `POST us/vba/provision` · `GET us/vba` |
+| 🏧 **Bank payouts** (Fin) | `GET payouts/{countries,banks,bank-branches}` · `POST payouts/validate-account` · `POST payouts` |
+| 💳 **Payment wallet-selection** | `POST payment/select-wallet` |
+
+Signatures complete via `POST wallets/submit-signature` (or `eu/orders/complete`
+for EU orders).
+
+---
+
+## 🚀 Run
+
+**1. Start the proxy API** (from the `bmoni-proxy-api` repo):
+
+```bash
+doppler run --config stg_bright -- pnpm start:dev:hmr
+```
+
+**2. Run the example:**
+
+```bash
+flutter pub get
+flutter run
+```
+
+**3. In the app**, set the proxy base URL and your partner `x-api-key`, then
+create an account.
+
+> Use the server **origin only** (e.g. `http://localhost:4001`) — **without** a
+> trailing `/v1`. Paths already start with `/v1/`. Default base URL is
+> `http://10.0.2.2:4001` on Android emulators, `http://localhost:4001`
+> elsewhere.
+
+---
+
+## 🔑 Authentication
+
+Every request sends the partner key as an **`x-api-key`** header. Use the
+`bmoniUserId` returned by `POST /v1/users` for all user-scoped endpoints.
+
+---
+
+## 📝 Notes
+
+- **Photos** — declares `NSPhotoLibraryUsageDescription` (iOS) and
+  `READ_MEDIA_IMAGES` / `READ_EXTERNAL_STORAGE` (Android, max SDK 32) so gallery
+  picks work for KYC document uploads. Add `NSCameraUsageDescription` only if you
+  switch to camera capture.
+- **`create-managed`** runs prepare + deploy + owner-registration server-side,
+  but the client must first prove control of the embedded owner address by
+  signing the owner-proof challenge.
+- **Session** state is stored with `shared_preferences`, so logout returns to the
+  PIN unlock screen without recreating the account.
+- **Native signer** — Android debug builds need the native
+  `me.bkey.ip:bmonisigner` dependency (used by `bmoni_embedded_sdk`) available
+  from a configured Maven repository.
+
+---
+
+## 📦 Related packages
+
+| Package | Purpose |
+| :--- | :--- |
+| [`bmoni_embedded_sdk`](https://pub.dev/packages/bmoni_embedded_sdk) | On-device EVM wallet + signing primitives |
+| [`bmoni_embedded_wallets_cards`](https://pub.dev/packages/bmoni_embedded_wallets_cards) | Wallet card UI |
+| [`bkey_uikit`](https://pub.dev/packages/bkey_uikit) | Shared UI components |
