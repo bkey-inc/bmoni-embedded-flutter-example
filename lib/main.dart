@@ -4272,26 +4272,39 @@ class SmartWallet {
     required this.id,
     required this.currency,
     required this.status,
+    this.isActive = false,
     this.smartAccountAddress,
     this.safeAddress,
     this.walletAddress,
     this.smartWalletId,
     this.threshold,
     this.approvalMode,
+    this.pendingDeployUserOperation,
+    this.deploySigningPayloadHash,
     this.createdAt,
   });
 
   final String id;
   final String currency;
+
+  /// Derived display state. The proxy returns [isActive] (not a `status`
+  /// string); we map it to `active` / `preparing` for the UI.
   final String status;
+  final bool isActive;
   final String? smartAccountAddress;
   final String? safeAddress;
 
-  /// Present on some upstream payloads as the deployed account address.
+  /// The proxy's `SmartWalletDetailResponse.walletAddress` — the deployed (or
+  /// counterfactual) smart-account address.
   final String? walletAddress;
   final String? smartWalletId;
   final int? threshold;
   final String? approvalMode;
+
+  /// Present on a first wallet only while it is still being deployed; null once
+  /// the smart account is live (or when an existing treasury is reused).
+  final String? pendingDeployUserOperation;
+  final String? deploySigningPayloadHash;
   final String? createdAt;
 
   factory SmartWallet.fromJson(Map<String, dynamic> json) {
@@ -4301,16 +4314,31 @@ class SmartWallet {
         json['walletId'] as String? ??
         json['groupWalletId'] as String? ??
         '';
+    final isActive = json['isActive'] as bool? ?? false;
+    // The proxy returns `walletAddress`; older/upstream payloads used
+    // `smartAccountAddress` / `safeAddress`. Treat them as the same address.
+    final address =
+        json['walletAddress'] as String? ??
+        json['smartAccountAddress'] as String? ??
+        json['safeAddress'] as String?;
+    final explicitStatus = (json['status'] as String?)?.trim();
     return SmartWallet(
       id: id,
       currency: json['currency'] as String? ?? '',
-      status: json['status'] as String? ?? '',
-      smartAccountAddress: json['smartAccountAddress'] as String?,
+      status: (explicitStatus != null && explicitStatus.isNotEmpty)
+          ? explicitStatus
+          : (isActive ? 'active' : 'preparing'),
+      isActive: isActive,
+      smartAccountAddress: json['smartAccountAddress'] as String? ?? address,
       safeAddress: json['safeAddress'] as String?,
-      walletAddress: json['walletAddress'] as String?,
+      walletAddress: address,
       smartWalletId: json['smartWalletId'] as String?,
       threshold: json['threshold'] as int?,
       approvalMode: json['approvalMode'] as String?,
+      // Defensive: the proxy types these as strings, but upstream may surface
+      // the raw user-operation object — stringify rather than risk a cast throw.
+      pendingDeployUserOperation: json['pendingDeployUserOperation']?.toString(),
+      deploySigningPayloadHash: json['deploySigningPayloadHash'] as String?,
       createdAt: json['createdAt'] as String?,
     );
   }
@@ -4319,12 +4347,15 @@ class SmartWallet {
     'id': id,
     'currency': currency,
     'status': status,
+    'isActive': isActive,
     'smartAccountAddress': smartAccountAddress,
     'safeAddress': safeAddress,
     'walletAddress': walletAddress,
     'smartWalletId': smartWalletId,
     'threshold': threshold,
     'approvalMode': approvalMode,
+    'pendingDeployUserOperation': pendingDeployUserOperation,
+    'deploySigningPayloadHash': deploySigningPayloadHash,
     'createdAt': createdAt,
   };
 }
