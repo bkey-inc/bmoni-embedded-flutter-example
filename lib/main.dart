@@ -3173,33 +3173,41 @@ class ProxyApiClient {
   }
 
   Future<List<SmartWallet>> listAccountSmartWallets(String userId) async {
-    final json = await _request(
+    // `account/wallets` returns a top-level JSON array of wallets. Some gateways
+    // wrap it as `{ data | value: { smartWallets | wallets: [...] } }`, so use
+    // the array-tolerant request and normalise every shape to a list.
+    final decoded = await _requestRaw(
       method: 'GET',
       path: '/v1/users/$userId/smart-wallets/account/wallets',
     );
-    final data = _unwrapData(json);
-    // Upstream group-wallet uses `wallets`; proxy OpenAPI uses `smartWallets`.
-    // Some gateways nest the dashboard under `value`.
-    Map<String, dynamic> layer = data;
-    var rawList = layer['smartWallets'] ?? layer['wallets'];
-    if (rawList is! List) {
-      final inner = layer['value'];
-      if (inner is Map<String, dynamic>) {
-        layer = inner;
-        rawList = layer['smartWallets'] ?? layer['wallets'];
+    List<dynamic> rawList = const [];
+    if (decoded is List) {
+      rawList = decoded;
+    } else if (decoded is Map<String, dynamic>) {
+      final data = decoded['data'];
+      if (data is List) {
+        rawList = data;
+      } else {
+        // Upstream group-wallet uses `wallets`; proxy OpenAPI uses
+        // `smartWallets`. Some gateways nest the dashboard under `data`/`value`.
+        final layer = data is Map<String, dynamic> ? data : decoded;
+        var list = layer['smartWallets'] ?? layer['wallets'];
+        if (list is! List) {
+          final inner = layer['value'];
+          if (inner is List) {
+            list = inner;
+          } else if (inner is Map<String, dynamic>) {
+            list = inner['smartWallets'] ?? inner['wallets'];
+          }
+        }
+        if (list is List) {
+          rawList = list;
+        }
       }
-    }
-    if (rawList is! List) {
-      return const [];
     }
     final out = <SmartWallet>[];
     for (final item in rawList) {
-      if (item is Map<String, dynamic>) {
-        final w = ProxyApiClient.smartWalletFromPayload(item);
-        if (w.id.trim().isNotEmpty) {
-          out.add(w);
-        }
-      } else if (item is Map) {
+      if (item is Map) {
         final w = ProxyApiClient.smartWalletFromPayload(
           Map<String, dynamic>.from(item),
         );
