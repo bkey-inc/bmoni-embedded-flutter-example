@@ -611,7 +611,18 @@ class _ExampleHomePageState extends State<ExampleHomePage> {
       );
     }
 
-    await _refreshAccountWalletData();
+    // Best-effort pre-flight to populate the duplicate-currency guard below.
+    // A first-time user has no smart-wallet group yet, so listing wallets /
+    // balances returns 400 "No embedded smart wallet group found … Call POST
+    // …/owner-proof-challenges first." — which is expected right before we
+    // create the first wallet. Don't let it abort provisioning; any genuine
+    // error (auth, network) resurfaces on the owner-proof call immediately
+    // below.
+    try {
+      await _refreshAccountWalletData();
+    } on ExampleException {
+      // No group / no wallets yet — proceed to create the first wallet.
+    }
     final requested = _selectedCurrency.smartWalletCurrency.toUpperCase();
     if (_ownedStablecoinCodes.contains(requested)) {
       throw ExampleException(
