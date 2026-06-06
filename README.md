@@ -108,20 +108,14 @@ for EU orders).
 
 ## 🚀 Run
 
-**1. Start the proxy API** (from the `bmoni-proxy-api` repo):
-
-```bash
-doppler run --config stg_bright -- pnpm start:dev:hmr
-```
-
-**2. Run the example:**
+**1. Run the example:**
 
 ```bash
 flutter pub get
 flutter run
 ```
 
-**3. In the app**, set the proxy base URL and your partner `x-api-key`, then
+**2. In the app**, set the proxy base URL and your partner `x-api-key`, then
 create an account.
 
 > Use the server **origin only** (e.g. `http://localhost:4001`) — **without** a
