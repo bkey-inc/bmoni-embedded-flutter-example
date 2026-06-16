@@ -79,7 +79,7 @@ enum ExampleStep {
 }
 
 enum WalletCurrencyOption {
-  usd('US Dollar', 'USD', 'USDB', 'Bridge KYC'),
+  usd('US Dollar', 'USD', 'USDB', 'US KYC'),
   cad('Canadian Dollar', 'CAD', 'CADC', 'PayTrie KYC'),
   eur('Euro', 'EUR', 'EURe', 'Monerium KYC'),
   ngn('Naira', 'NGN', 'CNGN', 'Anchor KYC');
@@ -131,7 +131,6 @@ class _ExampleHomePageState extends State<ExampleHomePage> {
   late final TextEditingController _emailController;
   late final TextEditingController _phoneController;
   late final TextEditingController _amountController;
-  late final TextEditingController _destinationAddressController;
   late final TextEditingController _toCurrencyController;
 
   late final TextEditingController _kycMiddleNameController;
@@ -174,11 +173,7 @@ class _ExampleHomePageState extends State<ExampleHomePage> {
   List<Map<String, dynamic>> _kycOccupationHits = [];
   Map<String, dynamic>? _kycOptionsJson;
 
-  /// USD (Bridge) requires TOS signing + storing `signedAgreementId`.
-  bool get _needsBridgeAgreement =>
-      _selectedCurrency == WalletCurrencyOption.usd;
-
-  static const int _kycPageCount = 7;
+  static const int _kycPageCount = 6;
 
   final ImagePicker _imagePicker = ImagePicker();
 
@@ -198,9 +193,6 @@ class _ExampleHomePageState extends State<ExampleHomePage> {
   late final TextEditingController _kycIdIssueController;
   String _kycPoaDocType = 'utility_bill';
 
-  String? _bridgeSigningUrl;
-  late final TextEditingController _bridgeSignedAgreementIdController;
-
   @override
   void initState() {
     super.initState();
@@ -215,9 +207,6 @@ class _ExampleHomePageState extends State<ExampleHomePage> {
     );
     _phoneController = TextEditingController(text: '+2348012345678');
     _amountController = TextEditingController(text: '10.00');
-    _destinationAddressController = TextEditingController(
-      text: '0x0000000000000000000000000000000000000001',
-    );
     _toCurrencyController = TextEditingController(text: 'NGN');
     _kycMiddleNameController = TextEditingController();
     _kycDobController = TextEditingController(text: '1990-01-01');
@@ -234,7 +223,6 @@ class _ExampleHomePageState extends State<ExampleHomePage> {
     _kycIdIssuingCountryController = TextEditingController(text: 'NGA');
     _kycIdExpirationController = TextEditingController(text: '2030-01-01');
     _kycIdIssueController = TextEditingController(text: '2020-01-01');
-    _bridgeSignedAgreementIdController = TextEditingController();
     _restoreSession();
   }
 
@@ -249,7 +237,6 @@ class _ExampleHomePageState extends State<ExampleHomePage> {
     _emailController.dispose();
     _phoneController.dispose();
     _amountController.dispose();
-    _destinationAddressController.dispose();
     _toCurrencyController.dispose();
     _kycMiddleNameController.dispose();
     _kycDobController.dispose();
@@ -266,7 +253,6 @@ class _ExampleHomePageState extends State<ExampleHomePage> {
     _kycIdIssuingCountryController.dispose();
     _kycIdExpirationController.dispose();
     _kycIdIssueController.dispose();
-    _bridgeSignedAgreementIdController.dispose();
     super.dispose();
   }
 
@@ -599,6 +585,108 @@ class _ExampleHomePageState extends State<ExampleHomePage> {
     await _saveSession(isLoggedIn: false);
   });
 
+  /// Full reset: wipes the local session, the on-device wallet, and the PIN,
+  /// then returns to account setup. The proxy URL + API key are kept so setup
+  /// is friction-free. Deleting the device wallet requires the matching PIN
+  /// (the SDK runs with `requirePin: true`); a missing/incorrect PIN leaves the
+  /// device key in place but still clears the app session.
+  Future<void> _confirmAndResetEverything() async {
+    if (_isBusy) {
+      return;
+    }
+    final pinController = TextEditingController();
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Reset app'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            const Text(
+              'This deletes the local session, the on-device wallet, and the '
+              'PIN, then returns to account setup. The proxy URL and API key '
+              'are kept. This cannot be undone.',
+            ),
+            const SizedBox(height: 16),
+            TextField(
+              controller: pinController,
+              obscureText: true,
+              keyboardType: TextInputType.number,
+              inputFormatters: [
+                FilteringTextInputFormatter.digitsOnly,
+                LengthLimitingTextInputFormatter(BmoniEmbeddedSdk.pinLength),
+              ],
+              decoration: const InputDecoration(
+                labelText: 'Current PIN (to wipe the device wallet)',
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Reset'),
+          ),
+        ],
+      ),
+    );
+    final pin = pinController.text.trim();
+    pinController.dispose();
+    if (confirmed != true) {
+      return;
+    }
+    await _runTask(() async {
+      String? walletNote;
+      try {
+        if (await BmoniEmbeddedSdk.hasWallet()) {
+          await BmoniEmbeddedSdk.deleteWallet(pin: pin);
+        }
+        if (await BmoniEmbeddedSdk.hasPin()) {
+          await BmoniEmbeddedSdk.removePin(pin);
+        }
+      } catch (_) {
+        walletNote =
+            ' The on-device wallet/PIN was not removed (PIN missing or '
+            'incorrect) — enter the correct PIN to wipe it.';
+      }
+
+      final prefs = await SharedPreferences.getInstance();
+      // Keep baseUrl + apiKey for convenient re-setup; clear everything else.
+      for (final key in const [
+        _ExampleSessionKeys.user,
+        _ExampleSessionKeys.smartWallet,
+        _ExampleSessionKeys.currency,
+        _ExampleSessionKeys.ownerAddress,
+        _ExampleSessionKeys.isLoggedIn,
+      ]) {
+        await prefs.remove(key);
+      }
+
+      if (!mounted) {
+        return;
+      }
+      _pinController.clear();
+      setState(() {
+        _profile = null;
+        _smartWallet = null;
+        _ownerAddress = null;
+        _accountWallets = [];
+        _accountBalancesData = const {};
+        _addingAnotherWallet = false;
+        _selectedCurrency = WalletCurrencyOption.usd;
+        _lastResponse = null;
+        _step = ExampleStep.createAccount;
+        _message =
+            'App reset.${walletNote ?? ''} Create a new account to set up again.';
+      });
+    });
+  }
+
   Future<void> _provisionSmartWallet() => _runTask(() async {
     final userId = _profile?.bmoniUserId;
     if (userId == null || userId.isEmpty) {
@@ -723,7 +811,7 @@ class _ExampleHomePageState extends State<ExampleHomePage> {
               ListTile(
                 leading: const Icon(Icons.currency_bitcoin),
                 title: const Text('Crypto deposit'),
-                subtitle: const Text('Bridge deposit address (on-chain)'),
+                subtitle: const Text('On-chain deposit address'),
                 onTap: () => Navigator.pop(ctx, 'crypto'),
               ),
               ListTile(
@@ -731,11 +819,11 @@ class _ExampleHomePageState extends State<ExampleHomePage> {
                 title: const Text('Bank transfer (VBA)'),
                 subtitle: Text(switch (_selectedCurrency) {
                   WalletCurrencyOption.usd =>
-                    'Provision a US VBA (Graph Finance) for this wallet',
+                    'Provision a USD virtual bank account for this wallet',
                   WalletCurrencyOption.ngn =>
-                    'Create a Nigerian deposit account for this wallet',
+                    'Create a NGN virtual bank account for this wallet',
                   WalletCurrencyOption.eur =>
-                    'Create an EU IBAN deposit account for this wallet',
+                    'Create an EUR virtual bank account (IBAN) for this wallet',
                   WalletCurrencyOption.cad =>
                     'Not demonstrated for CAD — use crypto',
                 }),
@@ -794,39 +882,38 @@ class _ExampleHomePageState extends State<ExampleHomePage> {
     }
   }
 
-  /// USD bank top-up now uses the dedicated `/us/vba/*` module (Graph Finance):
-  /// readiness gate → provision → fetch the issued account details. There is no
-  /// per-wallet "link" step in the new model — provisioning binds the VBA.
+  /// USD bank top-up: readiness gate (`GET /kyc/usd-readiness`) → provision
+  /// (`POST /onboarding/start-usa`) → poll status (`GET /vba/usd`). Provisioning
+  /// binds the USD VBA to the smart wallet; there is no separate "link" step.
   Future<void> _topUpBankUsd(String userId, String smartWalletId) async {
-    final readiness = await _client.getUsVbaReadiness(userId);
+    final readiness = await _client.getUsdReadiness(userId);
     if (readiness['ready'] != true) {
       final missing = (readiness['missing'] as List?)?.join(', ') ?? 'unknown';
       setState(() {
-        _message = 'US VBA not ready. Outstanding requirements: $missing.';
+        _message = 'USD VBA not ready. Outstanding requirements: $missing.';
         _lastResponse = _prettyJson(readiness);
       });
       return;
     }
-    final provision = await _client.provisionUsVba(
+    final provision = await _client.startUsaOnboarding(
       userId: userId,
       smartWalletId: smartWalletId,
     );
-    final vba = await _client.getUsVba(userId);
+    final vba = await _client.getUsdVba(userId);
     if (!mounted) {
       return;
     }
     setState(() {
       _message =
-          'US VBA provisioning ${provision['workflowId'] != null ? "started" : "requested"} '
-          '(status: ${vba['status'] ?? 'unknown'}). Poll GET /us/vba for account '
+          'USD VBA provisioning ${provision['workflowId'] != null ? "started" : "requested"} '
+          '(status: ${vba['status'] ?? 'unknown'}). Poll GET /vba/usd for account '
           'details once active.';
       _lastResponse = _prettyJson({'provision': provision, 'vba': vba});
     });
   }
 
-  /// Nigerian bank top-up: the Blockradar deposit account itself is the funding
-  /// rail — incoming NGN to it is swept to this wallet. The old separate
-  /// `onramp/vba/nigeria` link step was removed.
+  /// Nigerian bank top-up: the NGN virtual bank account itself is the funding
+  /// rail — incoming NGN to it is swept to this wallet as cNGN.
   Future<void> _topUpBankNgn(String userId, String smartWalletId) async {
     final raw = await _client.getBankAccounts(userId);
     final ng = ProxyApiClient.extractNigerianDeposits(raw);
@@ -837,13 +924,13 @@ class _ExampleHomePageState extends State<ExampleHomePage> {
       context: context,
       accounts: ng,
       title: 'Nigerian deposit VBA',
-      createNewLabel: 'Create Blockradar NGN deposit account',
+      createNewLabel: 'Create NGN virtual bank account',
     );
     if (!mounted || existingId == null) {
       return;
     }
     final account = existingId.isEmpty
-        ? await _client.createBlockradarDepositAccount(
+        ? await _client.createNgnVba(
             userId: userId,
             smartWalletId: smartWalletId,
           )
@@ -880,9 +967,8 @@ class _ExampleHomePageState extends State<ExampleHomePage> {
       return;
     }
     final account = existingId.isEmpty
-        ? await _client.createDepositAccount(
+        ? await _client.createEurVba(
             userId: userId,
-            region: 'EUR',
             smartWalletId: smartWalletId,
           )
         : eu.firstWhere(
@@ -938,6 +1024,9 @@ class _ExampleHomePageState extends State<ExampleHomePage> {
     );
   }
 
+  /// Withdraw bank offramp is wired for Nigeria only here. USD/EU/LATAM payouts
+  /// use the payout rails under Explore integrations. Crypto offramp was removed
+  /// from the proxy surface.
   Future<void> _handleWithdraw() async {
     if (_isBusy) {
       return;
@@ -946,25 +1035,15 @@ class _ExampleHomePageState extends State<ExampleHomePage> {
     if (!active || !mounted) {
       return;
     }
-    final method = await _showWithdrawMethodSheet();
-    if (method == null || !mounted) {
-      return;
-    }
-    if (method == 'bank' &&
-        _selectedCurrency != WalletCurrencyOption.ngn &&
-        _selectedCurrency != WalletCurrencyOption.usd) {
-      if (!mounted) {
-        return;
-      }
+    if (_selectedCurrency != WalletCurrencyOption.ngn) {
       await showDialog<void>(
         context: context,
         builder: (ctx) => AlertDialog(
           title: const Text('Bank withdrawal'),
           content: Text(
-            'This proxy exposes bank offramp for Nigeria and US only. '
-            'For ${_selectedCurrency.label}, use crypto withdrawal or extend '
-            'the client when an endpoint exists.\n\n'
-            'See Bank Accounts in Swagger.',
+            'This example wires bank offramp for Nigeria only. For '
+            '${_selectedCurrency.label}, use the payout rails under '
+            'Explore integrations (bank payouts, EU SEPA, LATAM).',
           ),
           actions: [
             TextButton(
@@ -976,189 +1055,7 @@ class _ExampleHomePageState extends State<ExampleHomePage> {
       );
       return;
     }
-    await _runTask(() async {
-      if (method == 'crypto') {
-        await _executeWithdrawCrypto();
-      } else {
-        await _executeWithdrawBank();
-      }
-    });
-  }
-
-  Future<String?> _showWithdrawMethodSheet() {
-    return showModalBottomSheet<String>(
-      context: context,
-      showDragHandle: true,
-      builder: (ctx) => SafeArea(
-        child: Padding(
-          padding: const EdgeInsets.fromLTRB(8, 0, 8, 16),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              Text(
-                'Withdraw',
-                style: Theme.of(ctx).textTheme.titleLarge,
-                textAlign: TextAlign.center,
-              ),
-              const SizedBox(height: 8),
-              ListTile(
-                leading: const Icon(Icons.currency_bitcoin),
-                title: const Text('Crypto'),
-                subtitle: const Text('Bridge crypto offramp proposal'),
-                onTap: () => Navigator.pop(ctx, 'crypto'),
-              ),
-              ListTile(
-                leading: const Icon(Icons.account_balance),
-                title: const Text('Bank transfer'),
-                subtitle: Text(switch (_selectedCurrency) {
-                  WalletCurrencyOption.ngn =>
-                    'Save Nigerian payout account, then offramp',
-                  WalletCurrencyOption.usd =>
-                    'ACH to a saved US payout account',
-                  WalletCurrencyOption.eur =>
-                    'Not available for this currency here',
-                  WalletCurrencyOption.cad =>
-                    'Not available for this currency here',
-                }),
-                onTap: () => Navigator.pop(ctx, 'bank'),
-              ),
-              TextButton.icon(
-                onPressed: () async {
-                  final uri = Uri.parse(kEmbeddedBankAccountsDocsUrl);
-                  if (await canLaunchUrl(uri)) {
-                    await launchUrl(uri, mode: LaunchMode.externalApplication);
-                  }
-                },
-                icon: const Icon(Icons.open_in_new, size: 18),
-                label: const Text('Bank Accounts API docs'),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-
-  Future<void> _executeWithdrawCrypto() async {
-    final confirmed = await _showActionInputSheet(
-      title: 'Withdraw to crypto address',
-      primaryLabel: 'Create proposal',
-      body: Column(
-        children: [
-          _TextInput(
-            controller: _amountController,
-            label: 'Amount',
-            keyboardType: const TextInputType.numberWithOptions(decimal: true),
-          ),
-          const SizedBox(height: 12),
-          _TextInput(
-            controller: _destinationAddressController,
-            label: 'Destination address',
-            keyboardType: TextInputType.text,
-          ),
-        ],
-      ),
-    );
-    if (confirmed != true) {
-      return;
-    }
-    final response = await _client.createCryptoOfframp(
-      userId: _requiredUserId,
-      smartWalletId: _requiredSmartWallet.id,
-      amount: _amountController.text.trim(),
-      destinationAddress: _destinationAddressController.text.trim(),
-      destinationChain: 'Base',
-      destinationCurrency: 'USDC',
-    );
-    setState(() {
-      _message =
-          'Crypto withdrawal proposal created. Admins approve and sign it.';
-      _lastResponse = _prettyJson(response);
-    });
-  }
-
-  Future<void> _executeWithdrawBank() async {
-    switch (_selectedCurrency) {
-      case WalletCurrencyOption.usd:
-        await _withdrawBankUsd();
-      case WalletCurrencyOption.ngn:
-        await _withdrawBankNgn();
-      case WalletCurrencyOption.eur:
-      case WalletCurrencyOption.cad:
-        throw const ExampleException('Unsupported bank withdrawal currency.');
-    }
-  }
-
-  Future<void> _withdrawBankUsd() async {
-    final userId = _requiredUserId;
-    final smartWalletId = _requiredSmartWallet.id;
-    final raw = await _client.getBankAccounts(userId);
-    final usa = ProxyApiClient.extractUsaWithdrawals(raw);
-    if (!mounted) {
-      return;
-    }
-    if (usa.isEmpty) {
-      await showDialog<void>(
-        context: context,
-        builder: (ctx) => AlertDialog(
-          title: const Text('No US payout account'),
-          content: const Text(
-            'You need a saved US withdrawal bank account before ACH offramp. '
-            'Provision one through your partner / Bridge flow, then '
-            'GET …/bank-accounts → withdrawalAccounts → usaAccounts.\n\n'
-            'Deposit VBAs (ACH in) are separate from payout accounts.',
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(ctx),
-              child: const Text('OK'),
-            ),
-          ],
-        ),
-      );
-      return;
-    }
-    final bankAccountId = await _pickWithdrawalBankAccountId(
-      context: context,
-      accounts: usa,
-      title: 'US payout account',
-    );
-    if (bankAccountId == null || !mounted) {
-      return;
-    }
-    final confirmed = await _showActionInputSheet(
-      title: 'ACH withdrawal',
-      primaryLabel: 'Create proposal',
-      body: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Text(
-            'Bank account id: $bankAccountId',
-            style: Theme.of(context).textTheme.bodySmall,
-          ),
-          const SizedBox(height: 12),
-          _TextInput(
-            controller: _amountController,
-            label: 'Amount (USDB)',
-            keyboardType: const TextInputType.numberWithOptions(decimal: true),
-          ),
-        ],
-      ),
-    );
-    if (confirmed != true) {
-      return;
-    }
-    final response = await _client.offrampUsBankAccount(
-      userId: userId,
-      smartWalletId: smartWalletId,
-      bankAccountId: bankAccountId,
-      amount: _amountController.text.trim(),
-    );
-    setState(() {
-      _message = 'US ACH offramp proposal created.';
-      _lastResponse = _prettyJson(response);
-    });
+    await _withdrawBankNgn();
   }
 
   Future<void> _withdrawBankNgn() async {
@@ -1178,38 +1075,6 @@ class _ExampleHomePageState extends State<ExampleHomePage> {
           'Nigerian bank offramp proposal created. Admins approve and sign it.';
       _lastResponse = _prettyJson(proposal);
     });
-  }
-
-  Future<String?> _pickWithdrawalBankAccountId({
-    required BuildContext context,
-    required List<Map<String, dynamic>> accounts,
-    required String title,
-  }) {
-    return showDialog<String>(
-      context: context,
-      builder: (ctx) => SimpleDialog(
-        title: Text(title),
-        children: [
-          for (final a in accounts)
-            SimpleDialogOption(
-              onPressed: () {
-                final id = ProxyApiClient.readBankAccountId(a);
-                if (id != null) {
-                  Navigator.pop(ctx, id);
-                }
-              },
-              child: Text(
-                '${a['bankName'] ?? 'Bank'} · '
-                '${ProxyApiClient.readBankAccountId(a) ?? '?'}',
-              ),
-            ),
-          SimpleDialogOption(
-            onPressed: () => Navigator.pop(ctx),
-            child: const Text('Cancel'),
-          ),
-        ],
-      ),
-    );
   }
 
   Future<void> _handleSwap() => _runTask(() async {
@@ -1252,6 +1117,30 @@ class _ExampleHomePageState extends State<ExampleHomePage> {
   });
 
   Future<bool> _ensureKycReady() async {
+    // USD readiness is the USD virtual bank account lifecycle (GET /vba/usd),
+    // not an onboarding/status rail — that endpoint no longer reports USD.
+    if (_selectedCurrency == WalletCurrencyOption.usd) {
+      Map<String, dynamic> vba;
+      try {
+        vba = await _client.getUsdVba(_requiredUserId);
+      } on ExampleException {
+        // No USD account yet — run the wizard, which activates KYC and
+        // provisions the account via POST /onboarding/start-usa.
+        await _openKycWizard(const {'status': 'none'});
+        return false;
+      }
+      final status = (vba['status'] ?? '').toString().toLowerCase();
+      if (status == 'active') {
+        return true;
+      }
+      if (status == 'provisioning' || status == 'pending') {
+        await _showPendingVerificationDialog();
+        return false;
+      }
+      await _openKycWizard(vba);
+      return false;
+    }
+
     final status = await _client.getOnboardingStatus(_requiredUserId);
     if (_isKycActiveForSelectedCurrency(status)) {
       return true;
@@ -1311,8 +1200,6 @@ class _ExampleHomePageState extends State<ExampleHomePage> {
         _kycPoaBackBytes = null;
         _kycPoaFilename = null;
         _kycPoaBackFilename = null;
-        _bridgeSigningUrl = null;
-        _bridgeSignedAgreementIdController.clear();
         _kycIdDocType = null;
         _kycPoaDocType = 'utility_bill';
         _applyKycOptionDefaults();
@@ -1444,80 +1331,6 @@ class _ExampleHomePageState extends State<ExampleHomePage> {
     }
   }
 
-  Future<void> _fetchBridgeSigningUrl() => _runTask(() async {
-    final json = await _client.getBridgeAgreementUrl(_requiredUserId);
-    final url = ProxyApiClient.readBridgeSigningUrl(json);
-    if (url == null || url.isEmpty) {
-      throw const ExampleException(
-        'Bridge signing URL missing from API response.',
-      );
-    }
-    setState(() {
-      _bridgeSigningUrl = url;
-      _message =
-          'Open the Bridge link, accept Terms, then paste the signed '
-          'agreement UUID (or full redirect URL) below.';
-    });
-  });
-
-  Future<void> _openBridgeSigningUrlInBrowser() async {
-    final url = _bridgeSigningUrl;
-    if (url == null || url.isEmpty) {
-      setState(() => _error = 'Tap “Generate Bridge link” first.');
-      return;
-    }
-    final uri = Uri.tryParse(url);
-    if (uri == null) {
-      setState(() => _error = 'Bridge URL could not be parsed.');
-      return;
-    }
-    final launched = await launchUrl(uri, mode: LaunchMode.externalApplication);
-    if (!launched && mounted) {
-      setState(() => _error = 'Could not open the Bridge URL on this device.');
-    }
-  }
-
-  bool _isUuid(String value) {
-    final s = value.trim();
-    return RegExp(
-      r'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-'
-      r'[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$',
-    ).hasMatch(s);
-  }
-
-  /// Accepts a raw UUID or a redirect URL whose query contains the agreement id.
-  String? _parseBridgeAgreementId(String raw) {
-    final t = raw.trim();
-    if (t.isEmpty) {
-      return null;
-    }
-    if (_isUuid(t)) {
-      return t;
-    }
-    final uri = Uri.tryParse(t);
-    if (uri != null) {
-      const keys = [
-        'signedAgreementId',
-        'signed_agreement_id',
-        'developer_id',
-        'developerId',
-        'agreementId',
-        'agreement_id',
-      ];
-      for (final k in keys) {
-        final v = uri.queryParameters[k];
-        if (v != null && _isUuid(v)) {
-          return v.trim();
-        }
-      }
-    }
-    final embedded = RegExp(
-      r'[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-'
-      r'[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}',
-    ).firstMatch(t);
-    return embedded?.group(0);
-  }
-
   Future<void> _submitKycWizard() => _runTask(() async {
     final userId = _requiredUserId;
     final bvn = _kycBvnController.text.trim();
@@ -1620,23 +1433,6 @@ class _ExampleHomePageState extends State<ExampleHomePage> {
       type: _kycPoaDocType,
     );
 
-    Map<String, dynamic>? bridgeStoreResult;
-    if (_needsBridgeAgreement) {
-      final agreementId = _parseBridgeAgreementId(
-        _bridgeSignedAgreementIdController.text,
-      );
-      if (agreementId == null) {
-        throw const ExampleException(
-          'Paste the Bridge signed agreement UUID (or full redirect URL) '
-          'before submitting.',
-        );
-      }
-      bridgeStoreResult = await _client.storeBridgeAgreement(
-        userId: userId,
-        signedAgreementId: agreementId,
-      );
-    }
-
     final readinessResult = await _client.getKycReadiness(userId);
 
     final sumsubLevel = switch (_selectedCurrency) {
@@ -1659,14 +1455,12 @@ class _ExampleHomePageState extends State<ExampleHomePage> {
     setState(() {
       _step = ExampleStep.walletHome;
       _message =
-          'KYC profile saved, documents uploaded, Bridge step completed where '
-          'needed, verification activated, and '
+          'KYC profile saved, documents uploaded, verification activated, and '
           '${_selectedCurrency.kycProviderLabel} started. Retry your action.';
       _lastResponse = _prettyJson({
         'patchKyc': patchResult,
         'uploadIdentification': idUpload,
         'uploadProofOfAddress': poaUpload,
-        'storeBridgeAgreement': bridgeStoreResult,
         'readiness': readinessResult,
         'activateKyc': activateResult,
         'startOnboarding': startBody,
@@ -1755,21 +1549,6 @@ class _ExampleHomePageState extends State<ExampleHomePage> {
           });
           return false;
         }
-      case 5:
-        if (_needsBridgeAgreement) {
-          final id = _parseBridgeAgreementId(
-            _bridgeSignedAgreementIdController.text,
-          );
-          if (id == null) {
-            setState(() {
-              _error =
-                  'Bridge: generate the signing URL, complete TOS in the '
-                  'browser, then paste the signed agreement UUID or full '
-                  'redirect URL.';
-            });
-            return false;
-          }
-        }
       default:
         break;
     }
@@ -1825,7 +1604,8 @@ class _ExampleHomePageState extends State<ExampleHomePage> {
     }
 
     return switch (_selectedCurrency) {
-      WalletCurrencyOption.usd => valueFor(['bridgeStatus']),
+      // USD readiness is handled via GET /vba/usd, not onboarding/status.
+      WalletCurrencyOption.usd => null,
       WalletCurrencyOption.cad => valueFor(['paytrieStatus']),
       WalletCurrencyOption.eur => valueFor([
         'moneriumStatus',
@@ -1951,6 +1731,12 @@ class _ExampleHomePageState extends State<ExampleHomePage> {
               onPressed: _isBusy ? null : _logout,
               icon: const Icon(Icons.logout),
             ),
+          if (_step != ExampleStep.loading)
+            IconButton(
+              tooltip: 'Reset app',
+              onPressed: _isBusy ? null : _confirmAndResetEverything,
+              icon: const Icon(Icons.restart_alt),
+            ),
         ],
       ),
       body: SafeArea(
@@ -2059,7 +1845,6 @@ class _ExampleHomePageState extends State<ExampleHomePage> {
       2 => 'Employment',
       3 => 'Compliance',
       4 => 'Documents',
-      5 => 'Bridge TOS',
       _ => 'Review',
     };
 
@@ -2421,53 +2206,6 @@ class _ExampleHomePageState extends State<ExampleHomePage> {
                 ],
               ),
               ListView(
-                children: [
-                  if (_needsBridgeAgreement) ...[
-                    Text(
-                      'Bridge Terms of Service',
-                      style: Theme.of(context).textTheme.titleSmall,
-                    ),
-                    const SizedBox(height: 8),
-                    Text(
-                      'Generate the signing URL (GET …/kyc/agreement-url), '
-                      'open it, complete TOS, then paste the signed agreement UUID '
-                      'from the redirect query (e.g. developer_id) or paste the '
-                      'full URL.',
-                      style: Theme.of(context).textTheme.bodySmall,
-                    ),
-                    const SizedBox(height: 12),
-                    BMoniButton.secondary(
-                      onPressed: _isBusy ? null : _fetchBridgeSigningUrl,
-                      text: 'Generate Bridge link',
-                    ),
-                    const SizedBox(height: 8),
-                    if (_bridgeSigningUrl != null)
-                      SelectableText(
-                        _bridgeSigningUrl!,
-                        style: Theme.of(context).textTheme.bodySmall,
-                      ),
-                    const SizedBox(height: 8),
-                    BMoniButton.secondary(
-                      onPressed: _isBusy
-                          ? null
-                          : _openBridgeSigningUrlInBrowser,
-                      text: 'Open in browser',
-                    ),
-                    const SizedBox(height: 16),
-                    _TextInput(
-                      controller: _bridgeSignedAgreementIdController,
-                      label: 'Signed agreement UUID or redirect URL',
-                      keyboardType: TextInputType.url,
-                    ),
-                  ] else
-                    Text(
-                      'Bridge TOS is only required for USD (Bridge) wallets. '
-                      'Tap Next to review.',
-                      style: Theme.of(context).textTheme.bodyMedium,
-                    ),
-                ],
-              ),
-              ListView(
                 padding: const EdgeInsets.only(bottom: 24),
                 children: [
                   Text(
@@ -2503,15 +2241,9 @@ class _ExampleHomePageState extends State<ExampleHomePage> {
                     '${_kycIdFrontBytes != null ? "ID file ready" : "no ID file"} · '
                     '${_kycPoaBytes != null ? "PoA ready" : "no PoA"}',
                   ),
-                  if (_needsBridgeAgreement)
-                    Text(
-                      'Bridge agreement: '
-                      '${_parseBridgeAgreementId(_bridgeSignedAgreementIdController.text) ?? "—"}',
-                    ),
                   const SizedBox(height: 16),
                   Text(
                     'Submit runs: PATCH /kyc → upload ID & PoA → '
-                    '${_needsBridgeAgreement ? "POST /kyc/agreement → " : ""}'
                     'GET /kyc/readiness → POST /kyc/activate → '
                     '${_selectedCurrency.kycProviderLabel} start-* onboarding.',
                     style: Theme.of(context).textTheme.bodySmall,
@@ -2809,10 +2541,10 @@ class _ExampleHomePageState extends State<ExampleHomePage> {
         _HeaderBlock(
           title: 'Wallet home',
           description:
-              'Top up: crypto (Bridge deposit) or bank (US VBA / regional '
-              'deposit account). Withdraw: crypto or bank. More provider ramps '
-              '(swap quote, EU SEPA, LATAM, payouts, payment) live under '
-              'Explore integrations. Onboarding is checked first.',
+              'Top up: crypto (on-chain deposit) or bank (USD / NGN / EUR '
+              'virtual bank account). Withdraw: Nigerian bank offramp. More '
+              'provider ramps (swap quote, EU SEPA, LATAM, payouts, payment) '
+              'live under Explore integrations. Onboarding is checked first.',
         ),
         EmbeddedWalletCard(
           wallet: walletCard,
@@ -3031,24 +2763,6 @@ class ProxyApiClient {
     return readBankAccountId(json);
   }
 
-  static List<Map<String, dynamic>> extractUsaDeposits(
-    Map<String, dynamic> root,
-  ) {
-    final r = bankAccountsRoot(root);
-    final dep = r['depositAccounts'];
-    if (dep is! Map<String, dynamic>) {
-      return const [];
-    }
-    final list = dep['usaAccounts'];
-    if (list is! List) {
-      return const [];
-    }
-    return list
-        .whereType<Map>()
-        .map((e) => Map<String, dynamic>.from(e))
-        .toList();
-  }
-
   static List<Map<String, dynamic>> extractEuropeanDeposits(
     Map<String, dynamic> root,
   ) {
@@ -3090,24 +2804,6 @@ class ProxyApiClient {
     addList(dep['nigerianAccounts']);
     addList(dep['activationAccounts']);
     return out;
-  }
-
-  static List<Map<String, dynamic>> extractUsaWithdrawals(
-    Map<String, dynamic> root,
-  ) {
-    final r = bankAccountsRoot(root);
-    final w = r['withdrawalAccounts'];
-    if (w is! Map<String, dynamic>) {
-      return const [];
-    }
-    final list = w['usaAccounts'];
-    if (list is! List) {
-      return const [];
-    }
-    return list
-        .whereType<Map>()
-        .map((e) => Map<String, dynamic>.from(e))
-        .toList();
   }
 
   Future<ProxyUser> createUser(CreateUserRequest input) async {
@@ -3288,30 +2984,6 @@ class ProxyApiClient {
     return _request(method: 'GET', path: '/v1/users/$userId/kyc/readiness');
   }
 
-  Future<Map<String, dynamic>> getBridgeAgreementUrl(String userId) {
-    return _request(
-      method: 'GET',
-      path: '/v1/users/$userId/kyc/agreement-url',
-    );
-  }
-
-  Future<Map<String, dynamic>> storeBridgeAgreement({
-    required String userId,
-    required String signedAgreementId,
-  }) {
-    return _request(
-      method: 'POST',
-      path: '/v1/users/$userId/kyc/agreement',
-      body: {'signedAgreementId': signedAgreementId.trim()},
-    );
-  }
-
-  /// `GET /kyc/agreement-url` returns the flat `{ url }` shape.
-  static String? readBridgeSigningUrl(Map<String, dynamic> json) {
-    final url = json['url'];
-    return (url is String && url.isNotEmpty) ? url : null;
-  }
-
   Future<Map<String, dynamic>> uploadKycIdentificationDocument({
     required String userId,
     required List<http.MultipartFile> files,
@@ -3440,9 +3112,9 @@ class ProxyApiClient {
     );
   }
 
-  /// Crypto top-up. `POST /deposit/wallet` returns a one-time Bridge deposit
+  /// Crypto top-up. `POST /deposit/wallet` returns a one-time on-chain deposit
   /// address; any supported crypto sent to it is converted and credited to the
-  /// smart wallet. Replaces the removed `smart-wallets/:id/onramp/crypto` route.
+  /// smart wallet.
   Future<Map<String, dynamic>> depositToWallet({
     required String userId,
     required String smartWalletId,
@@ -3461,26 +3133,6 @@ class ProxyApiClient {
     return _unwrapData(json);
   }
 
-  Future<Map<String, dynamic>> createCryptoOfframp({
-    required String userId,
-    required String smartWalletId,
-    required String amount,
-    required String destinationAddress,
-    required String destinationChain,
-    required String destinationCurrency,
-  }) {
-    return _request(
-      method: 'POST',
-      path: '/v1/users/$userId/smart-wallets/$smartWalletId/offramp/crypto',
-      body: {
-        'amount': amount,
-        'destinationAddress': destinationAddress,
-        'destinationChain': destinationChain,
-        'destinationCurrency': destinationCurrency,
-      },
-    );
-  }
-
   Future<Map<String, dynamic>> getBankAccounts(String userId) async {
     final json = await _request(
       method: 'GET',
@@ -3489,63 +3141,62 @@ class ProxyApiClient {
     return bankAccountsRoot(_unwrapData(json));
   }
 
-  Future<Map<String, dynamic>> createDepositAccount({
+  /// EUR virtual bank account (SEPA / Monerium). `ownershipModel` is
+  /// `dedicated` (unique IBAN) or `shared` (pooled + deposit reference, default).
+  Future<Map<String, dynamic>> createEurVba({
     required String userId,
-    required String region,
     required String smartWalletId,
     String ownershipModel = 'shared',
   }) async {
     final json = await _request(
       method: 'POST',
-      path: '/v1/users/$userId/bank-accounts/deposit-accounts',
-      body: {
-        'region': region,
-        'smartWalletId': smartWalletId,
-        'ownershipModel': ownershipModel,
-      },
+      path: '/v1/users/$userId/vba/eu',
+      body: {'smartWalletId': smartWalletId, 'ownershipModel': ownershipModel},
     );
     return _unwrapData(json);
   }
 
-  Future<Map<String, dynamic>> createBlockradarDepositAccount({
+  /// NGN virtual bank account (Blockradar). Incoming NGN is swept to the wallet
+  /// as cNGN.
+  Future<Map<String, dynamic>> createNgnVba({
     required String userId,
     required String smartWalletId,
   }) async {
     final json = await _request(
       method: 'POST',
-      path: '/v1/users/$userId/bank-accounts/deposit-accounts/blockradar',
+      path: '/v1/users/$userId/vba/ngn',
       body: {'smartWalletId': smartWalletId},
     );
     return _unwrapData(json);
   }
 
-  /// US virtual bank account (Graph Finance). Replaces the removed
-  /// `smart-wallets/:id/onramp/vba/us` route with the dedicated `/us/vba/*`
-  /// module: check readiness → provision → poll for account details.
-  Future<Map<String, dynamic>> getUsVbaReadiness(String userId) async {
+  /// USD virtual bank account flow: gate on readiness
+  /// (`GET /kyc/usd-readiness`) → provision (`POST /onboarding/start-usa`) →
+  /// poll status (`GET /vba/usd`).
+  Future<Map<String, dynamic>> getUsdReadiness(String userId) async {
     final json = await _request(
       method: 'GET',
-      path: '/v1/users/$userId/us/vba/readiness',
+      path: '/v1/users/$userId/kyc/usd-readiness',
     );
     return _unwrapData(json);
   }
 
-  Future<Map<String, dynamic>> provisionUsVba({
+  Future<Map<String, dynamic>> startUsaOnboarding({
     required String userId,
     required String smartWalletId,
   }) async {
     final json = await _request(
       method: 'POST',
-      path: '/v1/users/$userId/us/vba/provision',
+      path: '/v1/users/$userId/onboarding/start-usa',
       body: {'smartWalletId': smartWalletId},
     );
     return _unwrapData(json);
   }
 
-  Future<Map<String, dynamic>> getUsVba(String userId) async {
+  Future<Map<String, dynamic>> getUsdVba(String userId) async {
     final json = await _request(
       method: 'GET',
-      path: '/v1/users/$userId/us/vba',
+      path: '/v1/users/$userId/vba/usd',
     );
     return _unwrapData(json);
   }
@@ -3585,20 +3236,6 @@ class ProxyApiClient {
       method: 'POST',
       path: '/v1/users/$userId/smart-wallets/$smartWalletId/offramp/nigeria',
       body: {'bankAccountId': bankAccountId, 'fromAmount': fromAmount},
-    );
-  }
-
-  Future<Map<String, dynamic>> offrampUsBankAccount({
-    required String userId,
-    required String smartWalletId,
-    required String bankAccountId,
-    required String amount,
-  }) {
-    return _request(
-      method: 'POST',
-      path:
-          '/v1/users/$userId/smart-wallets/$smartWalletId/offramp/us-bank-account',
-      body: {'bankAccountId': bankAccountId, 'amount': amount},
     );
   }
 
@@ -4021,6 +3658,11 @@ class ProxyApiClient {
         wallet.smartAccountAddress ??
         wallet.safeAddress ??
         wallet.walletAddress;
+    // USD onboarding provisions a USD virtual bank account and only needs the
+    // destination smart wallet id; the others bind the on-chain wallet address.
+    if (currency == WalletCurrencyOption.usd) {
+      return {'smartWalletId': wallet.id};
+    }
     if (address == null || address.trim().isEmpty) {
       throw const ExampleException(
         'Smart wallet has no on-chain address; cannot start KYC.',
@@ -4028,10 +3670,7 @@ class ProxyApiClient {
     }
     const walletIndex = 0;
     return switch (currency) {
-      WalletCurrencyOption.usd => {
-        'usdWalletAddress': address,
-        'usdWalletIndex': walletIndex,
-      },
+      WalletCurrencyOption.usd => {'smartWalletId': wallet.id},
       WalletCurrencyOption.cad => {
         'cadWalletAddress': address,
         'cadWalletIndex': walletIndex,
@@ -4885,34 +4524,44 @@ class _IntegrationsPageState extends State<_IntegrationsPage> {
 
   Widget _buildUsVbaSection() {
     return _SectionCard(
-      title: 'US virtual bank account (#67)',
-      child: Wrap(
-        spacing: 8,
-        runSpacing: 8,
+      title: 'USD virtual bank account',
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          OutlinedButton(
-            onPressed: _busy
-                ? null
-                : () =>
-                      _run(() => widget.client.getUsVbaReadiness(_userId)),
-            child: const Text('Readiness'),
+          Text(
+            'Readiness (GET /kyc/usd-readiness) → provision '
+            '(POST /onboarding/start-usa) → status (GET /vba/usd).',
+            style: Theme.of(context).textTheme.bodySmall,
           ),
-          FilledButton(
-            onPressed: _busy
-                ? null
-                : () => _run(
-                    () => widget.client.provisionUsVba(
-                      userId: _userId,
-                      smartWalletId: _walletId,
-                    ),
-                  ),
-            child: const Text('Provision'),
-          ),
-          OutlinedButton(
-            onPressed: _busy
-                ? null
-                : () => _run(() => widget.client.getUsVba(_userId)),
-            child: const Text('GET vba'),
+          const SizedBox(height: 12),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              OutlinedButton(
+                onPressed: _busy
+                    ? null
+                    : () => _run(() => widget.client.getUsdReadiness(_userId)),
+                child: const Text('Readiness'),
+              ),
+              FilledButton(
+                onPressed: _busy
+                    ? null
+                    : () => _run(
+                        () => widget.client.startUsaOnboarding(
+                          userId: _userId,
+                          smartWalletId: _walletId,
+                        ),
+                      ),
+                child: const Text('Provision'),
+              ),
+              OutlinedButton(
+                onPressed: _busy
+                    ? null
+                    : () => _run(() => widget.client.getUsdVba(_userId)),
+                child: const Text('GET vba'),
+              ),
+            ],
           ),
         ],
       ),

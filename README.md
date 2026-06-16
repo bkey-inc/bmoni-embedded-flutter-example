@@ -53,9 +53,9 @@ A single guided flow, end to end:
 | :--- | :--- |
 | 👤 Create a user | `POST /v1/users` |
 | 💳 Provision a managed smart wallet | `owner-proof-challenges` → sign EIP-191 → `create-managed` |
-| 🪪 Complete KYC | options · occupations · document uploads · Bridge ToS · `activate` |
-| 💰 Top up | crypto (`deposit/wallet`) or bank rail (US VBA / regional deposit account) |
-| 🏦 Withdraw | crypto offramp · US ACH · Nigeria bank |
+| 🪪 Complete KYC | options · occupations · document uploads · `activate` |
+| 💰 Top up | crypto (`deposit/wallet`) or bank rail (USD / NGN / EUR virtual bank account) |
+| 🏦 Withdraw | Nigeria bank offramp (other rails live under Integrations) |
 | 🔁 Swap | `exchange/convert` rate preview |
 | 🧩 Integrations | the regional/provider ramps (below) |
 
@@ -97,7 +97,7 @@ endpoint.
 | 🇪🇺 **EU SEPA / Monerium** | `POST eu/kyc` · `eu/orders/prepare` · `eu/orders/complete` · `eu/files` |
 | 💵 **LATAM cash** (Pago46) | `POST latam/cash/orders/{fund,send}` · `GET latam/cash/orders[/:id]` |
 | 🇲🇽 **LATAM Mexico** (Etherfuse) | `latam/mx/kyc/{activate,status,bank-account}` · `latam/mx/quote` · `latam/mx/orders[/:id]` |
-| 🇺🇸 **US virtual bank account** | `GET us/vba/readiness` · `POST us/vba/provision` · `GET us/vba` |
+| 🇺🇸 **USD virtual bank account** | `GET kyc/usd-readiness` · `POST onboarding/start-usa` · `GET vba/usd` |
 | 🏧 **Bank payouts** (Fin) | `GET payouts/{countries,banks,bank-branches}` · `POST payouts/validate-account` · `POST payouts` |
 | 💳 **Payment wallet-selection** | `POST payment/select-wallet` |
 
