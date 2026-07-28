@@ -53,11 +53,17 @@ A single guided flow, end to end:
 | :--- | :--- |
 | 👤 Create a user | `POST /v1/users` |
 | 💳 Provision a managed smart wallet | `owner-proof-challenges` → sign EIP-191 → `create-managed` |
-| 🪪 Complete KYC | options · occupations · document uploads · `activate` |
-| 💰 Top up | crypto (`deposit/wallet`) or bank rail (USD / NGN / EUR virtual bank account) |
-| 🏦 Withdraw | Nigeria bank offramp (other rails live under Integrations) |
+| 🪪 Complete KYC | options · occupations · ID + PoA + biometric uploads · `readiness` · `activate` |
+| 🚦 Activate the rail | `start-usa` / `start-canada` / `start-monerium` / `start-nigeria` / `latam/mx/kyc/activate` |
+| 💰 Top up | crypto (`deposit/supported-assets` → `deposit/wallet`) or bank rail (USD / NGN / EUR virtual bank account) |
+| 🏦 Withdraw | Nigeria bank offramp → proposal → sign with the owner key |
 | 🔁 Swap | `exchange/convert` rate preview |
 | 🧩 Integrations | the regional/provider ramps (below) |
+
+Currencies: **USD** (`USDB`), **CAD** (`CADC`), **EUR** (`EURe`), **NGN** (`CNGN`),
+**MXN** (`MXNe`). The picker is filtered by
+`GET /v1/smart-wallets/supported-currencies`, so it follows the API rather than a
+hardcoded list.
 
 > [!NOTE]
 > **This is a demo, not production.** It favours clarity over polish — one
@@ -141,6 +147,21 @@ Every request sends the partner key as an **`x-api-key`** header. Use the
 - **`create-managed`** runs prepare + deploy + owner-registration server-side,
   but the client must first prove control of the embedded owner address by
   signing the owner-proof challenge.
+- **Global KYC path** — USD, EUR and MXN require a biometric selfie
+  (`POST …/kyc/documents/biometric`) and a `sumsubLevelName` at activation. CAD
+  and NGN must omit both; the wizard enforces this per currency.
+- **MXN** activates through Etherfuse (`POST …/latam/mx/kyc/activate`, no body)
+  and reports status from `GET …/latam/mx/kyc/status`, not `onboarding/status`.
+  Funding runs `latam/mx/quote` → `latam/mx/orders` under Integrations.
+- **Nigerian withdrawal** — the bank list comes from
+  `GET …/bank-accounts/nigerian-banks`, and registration requires the exact
+  holder name returned by `verify-nigerian-account`, so **Verify** gates
+  **Save payout & offramp**. The offramp returns a *proposal*: once approvals
+  move it to `PENDING_SIGNATURES`, the wallet-home card signs
+  `…/proposals/:id/sign-payload` with `signTransactionHash` and submits it to
+  `…/proposals/:id/sign`.
+- **Sandbox BVN** — the NGN step is prefilled with the docs' test BVN
+  `22222222222`.
 - **Session** state is stored with `shared_preferences`, so logout returns to the
   PIN unlock screen without recreating the account.
 - **Native signer** — Android debug builds need the native
