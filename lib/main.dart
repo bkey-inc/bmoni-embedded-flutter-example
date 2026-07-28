@@ -44,6 +44,13 @@ const List<String> kycProofOfAddressUploadTypes = [
   'other',
 ];
 
+/// A chain + token pair accepted for crypto top-ups, from
+/// `GET /v1/deposit/supported-assets`.
+typedef DepositAsset = ({String chain, String currency});
+
+/// A supported Nigerian bank, from `GET …/bank-accounts/nigerian-banks`.
+typedef NigerianBank = ({String name, String code});
+
 MediaType multipartMediaTypeForFilename(String? filename) {
   final name = (filename ?? '').toLowerCase();
   if (name.endsWith('.png')) {
@@ -82,7 +89,8 @@ enum WalletCurrencyOption {
   usd('US Dollar', 'USD', 'USDB', 'US KYC'),
   cad('Canadian Dollar', 'CAD', 'CADC', 'PayTrie KYC'),
   eur('Euro', 'EUR', 'EURe', 'Monerium KYC'),
-  ngn('Naira', 'NGN', 'CNGN', 'Anchor KYC');
+  ngn('Naira', 'NGN', 'CNGN', 'Anchor KYC'),
+  mxn('Mexican Peso', 'MXN', 'MXNe', 'Etherfuse KYC');
 
   const WalletCurrencyOption(
     this.label,
@@ -95,6 +103,11 @@ enum WalletCurrencyOption {
   final String fiatCode;
   final String smartWalletCurrency;
   final String kycProviderLabel;
+
+  /// The Global-KYC path (USD / EUR / MXN) requires a biometric selfie upload
+  /// (`POST …/kyc/documents/biometric`) and a `sumsubLevelName` at activation.
+  /// CAD and NGN must omit both.
+  bool get usesGlobalKyc => this == usd || this == eur || this == mxn;
 
   static WalletCurrencyOption fromSmartWalletCurrency(String value) {
     return WalletCurrencyOption.values.firstWhere(
@@ -153,8 +166,16 @@ class _ExampleHomePageState extends State<ExampleHomePage> {
   List<SmartWallet> _accountWallets = [];
   Map<String, dynamic> _accountBalancesData = const {};
   bool _addingAnotherWallet = false;
+
+  /// From `GET /v1/smart-wallets/supported-currencies`. Empty means "not loaded
+  /// yet" — the picker only filters once the API has answered.
+  List<String> _supportedWalletCurrencies = const [];
   WalletCurrencyOption _selectedCurrency = WalletCurrencyOption.usd;
   String? _ownerAddress;
+
+  /// Set after a Nigerian offramp returns a proposal. It needs an owner-key
+  /// signature once approvals move it to `PENDING_SIGNATURES`.
+  String? _pendingProposalId;
   String? _message;
   String? _error;
   String? _lastResponse;
@@ -185,6 +206,11 @@ class _ExampleHomePageState extends State<ExampleHomePage> {
   Uint8List? _kycPoaBackBytes;
   String? _kycPoaFilename;
   String? _kycPoaBackFilename;
+
+  /// Biometric selfie for the Global-KYC path (USD / EUR / MXN) — uploaded to
+  /// `POST …/kyc/documents/biometric`. Not required for CAD / NGN.
+  Uint8List? _kycSelfieBytes;
+  String? _kycSelfieFilename;
 
   String? _kycIdDocType;
   late final TextEditingController _kycIdDocumentNumberController;
@@ -218,7 +244,9 @@ class _ExampleHomePageState extends State<ExampleHomePage> {
     _kycCountryCodeController = TextEditingController(text: 'NGA');
     _kycEmployerController = TextEditingController(text: 'ACME Corp');
     _kycOccupationSearchController = TextEditingController(text: 'engineer');
-    _kycBvnController = TextEditingController();
+    // Sandbox test BVN from the docs: always verifies, returns fixed holder
+    // details. Real BVNs are only accepted in production.
+    _kycBvnController = TextEditingController(text: '22222222222');
     _kycIdDocumentNumberController = TextEditingController(text: 'A12345678');
     _kycIdIssuingCountryController = TextEditingController(text: 'NGA');
     _kycIdExpirationController = TextEditingController(text: '2030-01-01');
@@ -281,6 +309,27 @@ class _ExampleHomePageState extends State<ExampleHomePage> {
       .where((c) => c.isNotEmpty)
       .toSet();
 
+  /// True when the API has told us it cannot hold [option]'s stablecoin.
+  bool _isCurrencyUnsupported(WalletCurrencyOption option) =>
+      _supportedWalletCurrencies.isNotEmpty &&
+      !_supportedWalletCurrencies
+          .map((c) => c.toUpperCase())
+          .contains(option.smartWalletCurrency.toUpperCase());
+
+  /// Best-effort refresh of the supported-currency list. A failure here must not
+  /// block wallet creation, so the list simply stays empty and nothing filters.
+  Future<void> _loadSupportedWalletCurrencies() async {
+    try {
+      final currencies = await _client.getSupportedSmartWalletCurrencies();
+      if (!mounted || currencies.isEmpty) {
+        return;
+      }
+      setState(() => _supportedWalletCurrencies = currencies);
+    } catch (_) {
+      // Ignored: the picker falls back to showing every known currency.
+    }
+  }
+
   Future<void> _refreshAccountWalletData() async {
     final userId = _profile?.bmoniUserId;
     if (userId == null || userId.isEmpty) {
@@ -315,14 +364,17 @@ class _ExampleHomePageState extends State<ExampleHomePage> {
 
   Future<void> _startAddWalletFlow() => _runTask(() async {
     await _refreshAccountWalletData();
+    await _loadSupportedWalletCurrencies();
     if (!mounted) {
       return;
     }
     final available = WalletCurrencyOption.values
         .where(
-          (o) => !_ownedStablecoinCodes.contains(
-            o.smartWalletCurrency.toUpperCase(),
-          ),
+          (o) =>
+              !_ownedStablecoinCodes.contains(
+                o.smartWalletCurrency.toUpperCase(),
+              ) &&
+              !_isCurrencyUnsupported(o),
         )
         .toList();
     if (available.isEmpty) {
@@ -529,11 +581,13 @@ class _ExampleHomePageState extends State<ExampleHomePage> {
       _accountWallets = [];
       _accountBalancesData = const {};
       _addingAnotherWallet = false;
+      _pendingProposalId = null;
       _step = ExampleStep.selectCurrency;
       _message = 'Account created. Choose a wallet currency next.';
       _lastResponse = _prettyJson(user.toJson());
     });
     await _saveSession(isLoggedIn: true);
+    await _loadSupportedWalletCurrencies();
   });
 
   Future<void> _unlockWithPin() => _runTask(() async {
@@ -580,6 +634,7 @@ class _ExampleHomePageState extends State<ExampleHomePage> {
       _accountWallets = [];
       _accountBalancesData = const {};
       _addingAnotherWallet = false;
+      _pendingProposalId = null;
       _message = 'Logged out. Unlock with the device PIN to continue.';
     });
     await _saveSession(isLoggedIn: false);
@@ -678,6 +733,7 @@ class _ExampleHomePageState extends State<ExampleHomePage> {
         _accountWallets = [];
         _accountBalancesData = const {};
         _addingAnotherWallet = false;
+        _pendingProposalId = null;
         _selectedCurrency = WalletCurrencyOption.usd;
         _lastResponse = null;
         _step = ExampleStep.createAccount;
@@ -824,6 +880,8 @@ class _ExampleHomePageState extends State<ExampleHomePage> {
                     'Create a NGN virtual bank account for this wallet',
                   WalletCurrencyOption.eur =>
                     'Create an EUR virtual bank account (IBAN) for this wallet',
+                  WalletCurrencyOption.mxn =>
+                    'MXN arrives by SPEI — quote + order under Integrations',
                   WalletCurrencyOption.cad =>
                     'Not demonstrated for CAD — use crypto',
                 }),
@@ -846,22 +904,70 @@ class _ExampleHomePageState extends State<ExampleHomePage> {
     );
   }
 
+  /// Crypto top-up. The chain/token list comes from
+  /// `GET /v1/deposit/supported-assets` rather than being hardcoded; USDC on
+  /// Base is only the fallback when that catalogue cannot be read.
   Future<void> _executeTopUpCrypto() async {
     final userId = _requiredUserId;
     final smartWalletId = _requiredSmartWallet.id;
+
+    var assets = const <DepositAsset>[];
+    try {
+      assets = await _client.getSupportedDepositAssets();
+    } on ExampleException {
+      // Non-fatal — fall back to the documented default pair below.
+    }
+    var asset = assets.isNotEmpty
+        ? assets.first
+        : const (chain: 'Base', currency: 'USDC');
+    if (assets.length > 1) {
+      if (!mounted) {
+        return;
+      }
+      final picked = await _pickDepositAsset(assets);
+      if (picked == null || !mounted) {
+        return;
+      }
+      asset = picked;
+    }
+
     final response = await _client.depositToWallet(
       userId: userId,
       smartWalletId: smartWalletId,
-      chain: 'Base',
-      currency: 'USDC',
+      chain: asset.chain,
+      currency: asset.currency,
     );
+    if (!mounted) {
+      return;
+    }
     setState(() {
       final address = response['address'];
+      final pair = '${asset.currency} on ${asset.chain}';
       _message = address is String && address.isNotEmpty
-          ? 'Top up: send USDC on Base to $address — it is converted and credited automatically.'
-          : 'Top up: deposit address generated. Send USDC on Base to the returned address.';
+          ? 'Top up: send $pair to $address — it is converted and credited automatically.'
+          : 'Top up: deposit address generated. Send $pair to the returned address.';
       _lastResponse = _prettyJson(response);
     });
+  }
+
+  Future<DepositAsset?> _pickDepositAsset(List<DepositAsset> assets) {
+    return showDialog<DepositAsset>(
+      context: context,
+      builder: (ctx) => SimpleDialog(
+        title: const Text('Deposit asset'),
+        children: [
+          for (final asset in assets)
+            SimpleDialogOption(
+              onPressed: () => Navigator.pop(ctx, asset),
+              child: Text('${asset.currency} · ${asset.chain}'),
+            ),
+          SimpleDialogOption(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Cancel'),
+          ),
+        ],
+      ),
+    );
   }
 
   Future<void> _executeTopUpBank() async {
@@ -874,6 +980,12 @@ class _ExampleHomePageState extends State<ExampleHomePage> {
         await _topUpBankNgn(userId, smartWalletId);
       case WalletCurrencyOption.eur:
         await _topUpBankEur(userId, smartWalletId);
+      case WalletCurrencyOption.mxn:
+        throw const ExampleException(
+          'MXN top-up runs POST /latam/mx/quote → POST /latam/mx/orders and '
+          'shows the returned depositClabe. Use "LATAM Mexico" under Explore '
+          'integrations.',
+        );
       case WalletCurrencyOption.cad:
         throw const ExampleException(
           'Bank transfer top-up for CAD is not wired in this example. '
@@ -938,6 +1050,14 @@ class _ExampleHomePageState extends State<ExampleHomePage> {
             (a) => ProxyApiClient.readBankAccountId(a) == existingId,
             orElse: () => {'id': existingId},
           );
+    // The NUBAN the user actually transfers to lives on the deposit-accounts
+    // endpoint; it is informational here, so a failure must not fail the top-up.
+    Object? depositAccounts;
+    try {
+      depositAccounts = await _client.getNgnDepositAccounts(userId);
+    } on ExampleException {
+      depositAccounts = null;
+    }
     if (!mounted) {
       return;
     }
@@ -945,7 +1065,10 @@ class _ExampleHomePageState extends State<ExampleHomePage> {
       _message =
           'Nigerian deposit account ready. Incoming NGN to it is swept to this '
           'wallet per Anchor / Blockradar rules.';
-      _lastResponse = _prettyJson(account);
+      _lastResponse = _prettyJson({
+        'account': account,
+        'depositAccounts': depositAccounts,
+      });
     });
   }
 
@@ -1070,11 +1193,125 @@ class _ExampleHomePageState extends State<ExampleHomePage> {
     if (proposal == null || !mounted) {
       return;
     }
+    final proposalId = ProxyApiClient.readProposalId(proposal);
     setState(() {
-      _message =
-          'Nigerian bank offramp proposal created. Admins approve and sign it.';
+      _pendingProposalId = proposalId;
+      _message = proposalId == null
+          ? 'Nigerian bank offramp proposal created, but the response carried '
+                'no proposalId — check the raw body below.'
+          : 'Proposal $proposalId created (status '
+                '${proposal['status'] ?? 'unknown'}). Once approvals move it to '
+                'PENDING_SIGNATURES, sign it with the owner key below.';
       _lastResponse = _prettyJson(proposal);
     });
+  }
+
+  /// `GET …/smart-wallets/proposals/:proposalId` — poll for the terminal status.
+  Future<void> _checkPendingProposal() => _runTask(() async {
+    final proposalId = _pendingProposalId;
+    if (proposalId == null) {
+      return;
+    }
+    final proposal = await _client.getProposal(
+      userId: _requiredUserId,
+      proposalId: proposalId,
+    );
+    if (!mounted) {
+      return;
+    }
+    final status = (proposal['status'] ?? 'unknown').toString();
+    setState(() {
+      _message = 'Proposal $proposalId is $status.';
+      _lastResponse = _prettyJson(proposal);
+      if (status.toUpperCase() == 'COMPLETED') {
+        _pendingProposalId = null;
+      }
+    });
+  });
+
+  /// `GET …/proposals/:id/sign-payload` → sign the EIP-712 digest with the owner
+  /// key → `POST …/proposals/:id/sign`. The signer must be the same key
+  /// registered as `userOwnerAddress`, or the recovered address will not match.
+  Future<void> _signPendingProposal() async {
+    final proposalId = _pendingProposalId;
+    if (proposalId == null || _isBusy) {
+      return;
+    }
+    final pin = await _promptPin();
+    if (pin == null) {
+      return;
+    }
+    await _runTask(() async {
+      final userId = _requiredUserId;
+      final payload = await _client.getProposalSignPayload(
+        userId: userId,
+        proposalId: proposalId,
+      );
+      final hash = ProxyApiClient.extractSignableHash(payload);
+      if (hash == null) {
+        if (!mounted) {
+          return;
+        }
+        setState(() {
+          _message =
+              'sign-payload returned no 32-byte digest to sign — inspect the '
+              'raw payload below before signing anything.';
+          _lastResponse = _prettyJson(payload);
+        });
+        return;
+      }
+      final signature = await BmoniEmbeddedSdk.signTransactionHash(
+        hash,
+        pin: pin,
+      );
+      final signed = await _client.signProposal(
+        userId: userId,
+        proposalId: proposalId,
+        signature: signature,
+      );
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _message =
+            'Signature submitted for proposal $proposalId (status '
+            '${signed['status'] ?? 'unknown'}).';
+        _lastResponse = _prettyJson({'signPayload': payload, 'sign': signed});
+      });
+    });
+  }
+
+  Future<String?> _promptPin() {
+    final controller = TextEditingController();
+    return showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Enter wallet PIN'),
+        content: TextField(
+          controller: controller,
+          obscureText: true,
+          keyboardType: TextInputType.number,
+          autofocus: true,
+          inputFormatters: [
+            FilteringTextInputFormatter.digitsOnly,
+            LengthLimitingTextInputFormatter(BmoniEmbeddedSdk.pinLength),
+          ],
+          decoration: InputDecoration(
+            labelText: '${BmoniEmbeddedSdk.pinLength}-digit PIN',
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, controller.text.trim()),
+            child: const Text('Sign'),
+          ),
+        ],
+      ),
+    ).whenComplete(controller.dispose);
   }
 
   Future<void> _handleSwap() => _runTask(() async {
@@ -1141,6 +1378,28 @@ class _ExampleHomePageState extends State<ExampleHomePage> {
       return false;
     }
 
+    // Mexico reports its own Etherfuse review status; onboarding/status does
+    // not cover it. Poll GET /latam/mx/kyc/status until it reads `approved`.
+    if (_selectedCurrency == WalletCurrencyOption.mxn) {
+      Map<String, dynamic> mx;
+      try {
+        mx = await _client.getMxKycStatus(_requiredUserId);
+      } on ExampleException {
+        await _openKycWizard(const {'status': 'none'});
+        return false;
+      }
+      final status = (mx['status'] ?? '').toString().toLowerCase();
+      if (status == 'approved') {
+        return true;
+      }
+      if (status == 'pending' || status == 'processing') {
+        await _showPendingVerificationDialog();
+        return false;
+      }
+      await _openKycWizard(mx);
+      return false;
+    }
+
     final status = await _client.getOnboardingStatus(_requiredUserId);
     if (_isKycActiveForSelectedCurrency(status)) {
       return true;
@@ -1200,6 +1459,8 @@ class _ExampleHomePageState extends State<ExampleHomePage> {
         _kycPoaBackBytes = null;
         _kycPoaFilename = null;
         _kycPoaBackFilename = null;
+        _kycSelfieBytes = null;
+        _kycSelfieFilename = null;
         _kycIdDocType = null;
         _kycPoaDocType = 'utility_bill';
         _applyKycOptionDefaults();
@@ -1309,6 +1570,13 @@ class _ExampleHomePageState extends State<ExampleHomePage> {
     onBytes: (b, name) => setState(() {
       _kycPoaBackBytes = b;
       _kycPoaBackFilename = name;
+    }),
+  );
+
+  Future<void> _pickKycSelfie() => _pickKycImage(
+    onBytes: (b, name) => setState(() {
+      _kycSelfieBytes = b;
+      _kycSelfieFilename = name;
     }),
   );
 
@@ -1433,16 +1701,35 @@ class _ExampleHomePageState extends State<ExampleHomePage> {
       type: _kycPoaDocType,
     );
 
+    // Global-KYC path (USD / EUR / MXN): the biometric selfie is part of the
+    // fixed submit order, before /kyc/readiness. CAD / NGN skip it.
+    Map<String, dynamic>? biometricUpload;
+    final selfie = _kycSelfieBytes;
+    if (_selectedCurrency.usesGlobalKyc) {
+      if (selfie == null) {
+        throw ExampleException(
+          'A biometric selfie is required for ${_selectedCurrency.fiatCode} '
+          'onboarding. Pick one on the Documents step.',
+        );
+      }
+      biometricUpload = await _client.uploadKycBiometric(
+        userId: userId,
+        file: http.MultipartFile.fromBytes(
+          'files',
+          selfie,
+          filename: _kycSelfieFilename ?? 'biometric_selfie.jpg',
+          contentType: multipartMediaTypeForFilename(_kycSelfieFilename),
+        ),
+      );
+    }
+
     final readinessResult = await _client.getKycReadiness(userId);
 
-    final sumsubLevel = switch (_selectedCurrency) {
-      WalletCurrencyOption.ngn => null,
-      WalletCurrencyOption.cad => null,
-      _ => 'id-and-liveness',
-    };
     final activateResult = await _client.activateKyc(
       userId: userId,
-      sumsubLevelName: sumsubLevel,
+      sumsubLevelName: _selectedCurrency.usesGlobalKyc
+          ? 'id-and-liveness'
+          : null,
     );
 
     final startBody = await _client.startKyc(
@@ -1461,6 +1748,7 @@ class _ExampleHomePageState extends State<ExampleHomePage> {
         'patchKyc': patchResult,
         'uploadIdentification': idUpload,
         'uploadProofOfAddress': poaUpload,
+        'uploadBiometric': ?biometricUpload,
         'readiness': readinessResult,
         'activateKyc': activateResult,
         'startOnboarding': startBody,
@@ -1549,6 +1837,14 @@ class _ExampleHomePageState extends State<ExampleHomePage> {
           });
           return false;
         }
+        if (_selectedCurrency.usesGlobalKyc && _kycSelfieBytes == null) {
+          setState(() {
+            _error =
+                'Documents: ${_selectedCurrency.fiatCode} runs the Global KYC '
+                'path, which requires a biometric selfie.';
+          });
+          return false;
+        }
       default:
         break;
     }
@@ -1604,8 +1900,10 @@ class _ExampleHomePageState extends State<ExampleHomePage> {
     }
 
     return switch (_selectedCurrency) {
-      // USD readiness is handled via GET /vba/usd, not onboarding/status.
+      // USD readiness is handled via GET /vba/usd, and MXN via
+      // GET /latam/mx/kyc/status — neither is reported by onboarding/status.
       WalletCurrencyOption.usd => null,
+      WalletCurrencyOption.mxn => null,
       WalletCurrencyOption.cad => valueFor(['paytrieStatus']),
       WalletCurrencyOption.eur => valueFor([
         'moneriumStatus',
@@ -2100,7 +2398,7 @@ class _ExampleHomePageState extends State<ExampleHomePage> {
                     const SizedBox(height: 8),
                     _TextInput(
                       controller: _kycBvnController,
-                      label: 'BVN (11 digits)',
+                      label: 'BVN (11 digits · sandbox test 22222222222)',
                       keyboardType: TextInputType.number,
                       inputFormatters: [
                         FilteringTextInputFormatter.digitsOnly,
@@ -2118,8 +2416,9 @@ class _ExampleHomePageState extends State<ExampleHomePage> {
                   ),
                   const SizedBox(height: 8),
                   Text(
-                    'Uses POST …/kyc/documents/identification and '
-                    '…/documents/proof-of-address (multipart).',
+                    'Uses POST …/kyc/documents/identification, '
+                    '…/documents/proof-of-address and, on the Global KYC path '
+                    '(USD / EUR / MXN), …/documents/biometric (multipart).',
                     style: Theme.of(context).textTheme.bodySmall,
                   ),
                   const SizedBox(height: 12),
@@ -2149,6 +2448,13 @@ class _ExampleHomePageState extends State<ExampleHomePage> {
                             ? 'PoA back (opt.)'
                             : 'PoA back ✓',
                       ),
+                      if (_selectedCurrency.usesGlobalKyc)
+                        BMoniButton.secondary(
+                          onPressed: _isBusy ? null : _pickKycSelfie,
+                          text: _kycSelfieBytes == null
+                              ? 'Selfie (required)'
+                              : 'Selfie ✓',
+                        ),
                     ],
                   ),
                   const SizedBox(height: 16),
@@ -2239,13 +2545,21 @@ class _ExampleHomePageState extends State<ExampleHomePage> {
                     'Documents: ID ${_kycIdDocType ?? '—'} · '
                     'PoA $_kycPoaDocType · '
                     '${_kycIdFrontBytes != null ? "ID file ready" : "no ID file"} · '
-                    '${_kycPoaBytes != null ? "PoA ready" : "no PoA"}',
+                    '${_kycPoaBytes != null ? "PoA ready" : "no PoA"}'
+                    '${_selectedCurrency.usesGlobalKyc
+                        ? _kycSelfieBytes != null
+                              ? " · selfie ready"
+                              : " · no selfie"
+                        : ""}',
                   ),
                   const SizedBox(height: 16),
                   Text(
-                    'Submit runs: PATCH /kyc → upload ID & PoA → '
-                    'GET /kyc/readiness → POST /kyc/activate → '
-                    '${_selectedCurrency.kycProviderLabel} start-* onboarding.',
+                    'Submit runs: PATCH /kyc → upload ID & PoA'
+                    '${_selectedCurrency.usesGlobalKyc ? " & biometric" : ""} → '
+                    'GET /kyc/readiness → POST /kyc/activate'
+                    '${_selectedCurrency.usesGlobalKyc ? " (sumsubLevelName: id-and-liveness)" : " (no body)"} → '
+                    '${_selectedCurrency.kycProviderLabel} '
+                    '${_selectedCurrency == WalletCurrencyOption.mxn ? "activation" : "start-* onboarding"}.',
                     style: Theme.of(context).textTheme.bodySmall,
                   ),
                   if (_lastResponse != null) ...[
@@ -2451,20 +2765,23 @@ class _ExampleHomePageState extends State<ExampleHomePage> {
           child: Column(
             children: [
               for (final option in WalletCurrencyOption.values)
-                _CurrencyOptionTile(
-                  option: option,
-                  isSelected: option == _selectedCurrency,
-                  disabled: _ownedStablecoinCodes.contains(
+                () {
+                  final owned = _ownedStablecoinCodes.contains(
                     option.smartWalletCurrency.toUpperCase(),
-                  ),
-                  footnote:
-                      _ownedStablecoinCodes.contains(
-                        option.smartWalletCurrency.toUpperCase(),
-                      )
-                      ? 'Already created for this account'
-                      : null,
-                  onTap: () => setState(() => _selectedCurrency = option),
-                ),
+                  );
+                  final unsupported = _isCurrencyUnsupported(option);
+                  return _CurrencyOptionTile(
+                    option: option,
+                    isSelected: option == _selectedCurrency,
+                    disabled: owned || unsupported,
+                    footnote: owned
+                        ? 'Already created for this account'
+                        : unsupported
+                        ? 'Not in GET /v1/smart-wallets/supported-currencies'
+                        : null,
+                    onTap: () => setState(() => _selectedCurrency = option),
+                  );
+                }(),
             ],
           ),
         ),
@@ -2491,8 +2808,9 @@ class _ExampleHomePageState extends State<ExampleHomePage> {
                 child: BMoniButton.primary(
                   onPressed:
                       _ownedStablecoinCodes.contains(
-                        _selectedCurrency.smartWalletCurrency.toUpperCase(),
-                      )
+                            _selectedCurrency.smartWalletCurrency.toUpperCase(),
+                          ) ||
+                          _isCurrencyUnsupported(_selectedCurrency)
                       ? null
                       : _provisionSmartWallet,
                   text: 'Create smart wallet',
@@ -2541,9 +2859,11 @@ class _ExampleHomePageState extends State<ExampleHomePage> {
         _HeaderBlock(
           title: 'Wallet home',
           description:
-              'Top up: crypto (on-chain deposit) or bank (USD / NGN / EUR '
-              'virtual bank account). Withdraw: Nigerian bank offramp. More '
-              'provider ramps (swap quote, EU SEPA, LATAM, payouts, payment) '
+              'Top up: crypto (chains and tokens from '
+              'GET /v1/deposit/supported-assets) or bank (USD / NGN / EUR '
+              'virtual bank account). Withdraw: Nigerian bank offramp — a '
+              'proposal you then sign with the owner key. More provider ramps '
+              '(swap quote, EU SEPA, LATAM cash, MXN ramp, payouts, payment) '
               'live under Explore integrations. Onboarding is checked first.',
         ),
         EmbeddedWalletCard(
@@ -2566,6 +2886,35 @@ class _ExampleHomePageState extends State<ExampleHomePage> {
           onWithdraw: _handleWithdraw,
           onSwap: _handleSwap,
         ),
+        if (_pendingProposalId != null) ...[
+          const SizedBox(height: 16),
+          _SectionCard(
+            title: 'Pending offramp proposal',
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                _KeyValueRow(label: 'Proposal', value: _pendingProposalId!),
+                Text(
+                  'PENDING_APPROVALS → PENDING_SIGNATURES → COMPLETED. Signing '
+                  'before approvals clear is rejected — poll the status first.',
+                  style: Theme.of(context).textTheme.bodySmall,
+                ),
+                const SizedBox(height: 12),
+                OutlinedButton.icon(
+                  onPressed: _isBusy ? null : _checkPendingProposal,
+                  icon: const Icon(Icons.refresh),
+                  label: const Text('Check status'),
+                ),
+                const SizedBox(height: 8),
+                FilledButton.icon(
+                  onPressed: _isBusy ? null : _signPendingProposal,
+                  icon: const Icon(Icons.draw_outlined),
+                  label: const Text('Sign proposal with owner key'),
+                ),
+              ],
+            ),
+          ),
+        ],
         const SizedBox(height: 16),
         _SectionCard(
           title: 'Explore integrations',
@@ -3019,6 +3368,20 @@ class ProxyApiClient {
     );
   }
 
+  /// Biometric selfie upload. Required on the Global KYC path (USD / EUR / MXN)
+  /// and not used for CAD / NGN. [file] carries no extra form fields; build it
+  /// with the same `files` field name as the other document endpoints.
+  Future<Map<String, dynamic>> uploadKycBiometric({
+    required String userId,
+    required http.MultipartFile file,
+  }) {
+    return _sendMultipartJson(
+      path: '/v1/users/$userId/kyc/documents/biometric',
+      files: [file],
+      fields: const {},
+    );
+  }
+
   Future<Map<String, dynamic>> _sendMultipartJson({
     required String path,
     required List<http.MultipartFile> files,
@@ -3107,6 +3470,8 @@ class ProxyApiClient {
           '/v1/users/$userId/onboarding/start-monerium',
         WalletCurrencyOption.ngn =>
           '/v1/users/$userId/onboarding/start-nigeria',
+        // Mexico activates through Etherfuse instead of onboarding/start-*.
+        WalletCurrencyOption.mxn => '/v1/users/$userId/latam/mx/kyc/activate',
       },
       body: _kycStartBody(currency, smartWallet, nigeriaBvn: nigeriaBvn),
     );
@@ -3226,17 +3591,294 @@ class ProxyApiClient {
     return _unwrapData(json);
   }
 
+  /// Nigerian bank offramp. `fromAmount` is a **decimal** string (`"100.00"`) —
+  /// unlike `POST /payouts`, whose `amount` is USDB minor units. Returns a
+  /// proposal (`proposalId`, `status`), not a completed payout: it moves
+  /// `PENDING_APPROVALS` → `PENDING_SIGNATURES` → `COMPLETED`, and the owner key
+  /// signs it via [getProposalSignPayload] + [signProposal].
   Future<Map<String, dynamic>> offrampNigeriaBank({
     required String userId,
     required String smartWalletId,
     required String bankAccountId,
     required String fromAmount,
-  }) {
-    return _request(
+  }) async {
+    final json = await _request(
       method: 'POST',
       path: '/v1/users/$userId/smart-wallets/$smartWalletId/offramp/nigeria',
       body: {'bankAccountId': bankAccountId, 'fromAmount': fromAmount},
     );
+    return _unwrapData(json);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Smart-wallet proposals — approve-then-sign flow (Nigerian offramp)
+  // ---------------------------------------------------------------------------
+
+  /// EIP-712 payload for a pending proposal. Returns 404/409 while the proposal
+  /// is still `PENDING_APPROVALS`.
+  Future<Map<String, dynamic>> getProposalSignPayload({
+    required String userId,
+    required String proposalId,
+  }) async {
+    final json = await _request(
+      method: 'GET',
+      path:
+          '/v1/users/$userId/smart-wallets/proposals/$proposalId/sign-payload',
+    );
+    return _unwrapData(json);
+  }
+
+  Future<Map<String, dynamic>> signProposal({
+    required String userId,
+    required String proposalId,
+    required String signature,
+  }) async {
+    final json = await _request(
+      method: 'POST',
+      path: '/v1/users/$userId/smart-wallets/proposals/$proposalId/sign',
+      body: {'signature': signature},
+    );
+    return _unwrapData(json);
+  }
+
+  Future<Map<String, dynamic>> getProposal({
+    required String userId,
+    required String proposalId,
+  }) async {
+    final json = await _request(
+      method: 'GET',
+      path: '/v1/users/$userId/smart-wallets/proposals/$proposalId',
+    );
+    return _unwrapData(json);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Runtime discovery — build pickers instead of hardcoding lists
+  // ---------------------------------------------------------------------------
+
+  /// `GET /v1/smart-wallets/supported-currencies` — stablecoin codes a smart
+  /// wallet can hold (`USDB`, `CNGN`, `CADC`, `EURe`, `GBPe`, `MXNe`). Not
+  /// user-scoped, so it can be called before onboarding.
+  Future<List<String>> getSupportedSmartWalletCurrencies() async {
+    final decoded = await _requestRaw(
+      method: 'GET',
+      path: '/v1/smart-wallets/supported-currencies',
+    );
+    return parseSupportedCurrencies(decoded);
+  }
+
+  /// `GET /v1/deposit/supported-assets` — chains and tokens accepted for crypto
+  /// top-ups. Also not user-scoped.
+  Future<List<DepositAsset>> getSupportedDepositAssets() async {
+    final decoded = await _requestRaw(
+      method: 'GET',
+      path: '/v1/deposit/supported-assets',
+    );
+    return flattenDepositAssets(decoded);
+  }
+
+  /// `GET …/bank-accounts/nigerian-banks` — every supported bank with its CBN
+  /// code. Both the name and the code must be sent verbatim to
+  /// `verify-nigerian-account` and `withdrawal-accounts/nigeria`.
+  Future<List<NigerianBank>> getNigerianBanks(String userId) async {
+    final decoded = await _requestRaw(
+      method: 'GET',
+      path: '/v1/users/$userId/bank-accounts/nigerian-banks',
+    );
+    return parseNigerianBanks(decoded);
+  }
+
+  /// `GET …/bank-accounts/deposit-accounts/NGN` — the NGN virtual account
+  /// details (the number the user transfers to).
+  Future<Object?> getNgnDepositAccounts(String userId) {
+    return _requestRaw(
+      method: 'GET',
+      path: '/v1/users/$userId/bank-accounts/deposit-accounts/NGN',
+    );
+  }
+
+  // ---------------------------------------------------------------------------
+  // Tolerant parsers for provider-shaped payloads
+  // ---------------------------------------------------------------------------
+
+  /// Unwraps a `data` / `value` envelope, or returns [raw] unchanged.
+  static Object? _payload(Object? raw, [Set<String>? keys]) {
+    if (raw is! Map) {
+      return raw;
+    }
+    for (final key in keys ?? const {'data', 'value'}) {
+      final inner = raw[key];
+      if (inner != null) {
+        return inner;
+      }
+    }
+    return raw;
+  }
+
+  static List<String> parseSupportedCurrencies(Object? raw) {
+    final payload = _payload(raw, const {
+      'data',
+      'value',
+      'currencies',
+      'supportedCurrencies',
+    });
+    final out = <String>[];
+    void add(Object? value) {
+      if (value is String && value.trim().isNotEmpty) {
+        final code = value.trim();
+        if (!out.contains(code)) {
+          out.add(code);
+        }
+      }
+    }
+
+    if (payload is List) {
+      for (final item in payload) {
+        if (item is Map) {
+          add(item['currency'] ?? item['code'] ?? item['symbol']);
+        } else {
+          add(item);
+        }
+      }
+    }
+    return out;
+  }
+
+  /// Flattens `GET /v1/deposit/supported-assets` into `(chain, currency)` pairs.
+  /// The payload is grouped by chain, and gateways differ on the exact shape, so
+  /// accept a list of `{chain, currencies[]}`, a list of `{chain, currency}`, or
+  /// a plain `{ "Base": ["USDC", …] }` map.
+  static List<DepositAsset> flattenDepositAssets(Object? raw) {
+    final payload = _payload(raw, const {'data', 'value', 'assets', 'chains'});
+    final out = <DepositAsset>[];
+    void add(String? chain, Object? currency) {
+      if (chain == null || chain.trim().isEmpty) {
+        return;
+      }
+      final code = switch (currency) {
+        final String s => s.trim(),
+        final Map m =>
+          (m['currency'] ?? m['code'] ?? m['symbol'])?.toString().trim() ?? '',
+        _ => '',
+      };
+      if (code.isEmpty) {
+        return;
+      }
+      final asset = (chain: chain.trim(), currency: code);
+      if (!out.contains(asset)) {
+        out.add(asset);
+      }
+    }
+
+    void addGroup(String? chain, Map group) {
+      final list = group['currencies'] ?? group['tokens'] ?? group['assets'];
+      if (list is List) {
+        for (final currency in list) {
+          add(chain, currency);
+        }
+        return;
+      }
+      add(chain, group['currency'] ?? group['code'] ?? group['symbol']);
+    }
+
+    if (payload is List) {
+      for (final item in payload) {
+        if (item is Map) {
+          addGroup(
+            (item['chain'] ?? item['network'] ?? item['blockchain'])
+                ?.toString(),
+            item,
+          );
+        }
+      }
+    } else if (payload is Map) {
+      payload.forEach((chain, value) {
+        if (value is List) {
+          for (final currency in value) {
+            add(chain.toString(), currency);
+          }
+        } else if (value is Map) {
+          addGroup(chain.toString(), value);
+        }
+      });
+    }
+    return out;
+  }
+
+  static List<NigerianBank> parseNigerianBanks(Object? raw) {
+    final payload = _payload(raw, const {'data', 'value', 'banks'});
+    final out = <NigerianBank>[];
+    if (payload is! List) {
+      return out;
+    }
+    for (final item in payload) {
+      if (item is! Map) {
+        continue;
+      }
+      final name = (item['name'] ?? item['bankName'])?.toString().trim() ?? '';
+      final code =
+          (item['code'] ?? item['bankCode'] ?? item['cbnCode'])
+              ?.toString()
+              .trim() ??
+          '';
+      if (name.isNotEmpty && code.isNotEmpty) {
+        out.add((name: name, code: code));
+      }
+    }
+    return out;
+  }
+
+  static String? readProposalId(Map<String, dynamic> json) {
+    final root = _payload(json);
+    if (root is! Map) {
+      return null;
+    }
+    final id = root['proposalId'] ?? root['id'];
+    return (id is String && id.trim().isNotEmpty) ? id.trim() : null;
+  }
+
+  /// Digs the 32-byte digest out of a `sign-payload` / `signatureRequest`
+  /// response. Returns null when nothing 32-byte-shaped is present, so callers
+  /// can show the raw body instead of signing a guess.
+  static String? extractSignableHash(Object? raw) {
+    const hashKeys = {
+      'hashToSign',
+      'signingPayloadHash',
+      'payloadHash',
+      'messageToSign',
+      'digest',
+      'hash',
+    };
+    final hex = RegExp(r'^0x[0-9a-fA-F]{64}$');
+
+    String? walk(Object? node, int depth) {
+      if (node is String) {
+        return hex.hasMatch(node.trim()) ? node.trim() : null;
+      }
+      if (node is! Map || depth > 4) {
+        return null;
+      }
+      for (final key in hashKeys) {
+        final found = walk(node[key], depth + 1);
+        if (found != null) {
+          return found;
+        }
+      }
+      for (final key in const [
+        'data',
+        'value',
+        'signatureRequest',
+        'payload',
+      ]) {
+        final found = walk(node[key], depth + 1);
+        if (found != null) {
+          return found;
+        }
+      }
+      return null;
+    }
+
+    return walk(raw, 0);
   }
 
   Future<Map<String, dynamic>> convertCurrency({
@@ -3414,18 +4056,22 @@ class ProxyApiClient {
   // LATAM Mexico — Etherfuse (#66)
   // ---------------------------------------------------------------------------
 
-  Future<Map<String, dynamic>> activateMxKyc(String userId) {
-    return _request(
+  Future<Map<String, dynamic>> activateMxKyc(String userId) async {
+    final json = await _request(
       method: 'POST',
       path: '/v1/users/$userId/latam/mx/kyc/activate',
     );
+    return _unwrapData(json);
   }
 
-  Future<Map<String, dynamic>> getMxKycStatus(String userId) {
-    return _request(
+  /// Etherfuse review status — `pending` while in flight, `approved` once done.
+  /// This is what gates MXN, not `onboarding/status`.
+  Future<Map<String, dynamic>> getMxKycStatus(String userId) async {
+    final json = await _request(
       method: 'GET',
       path: '/v1/users/$userId/latam/mx/kyc/status',
     );
+    return _unwrapData(json);
   }
 
   /// [account] is the personal- or business-shaped CLABE registration object.
@@ -3663,6 +4309,11 @@ class ProxyApiClient {
     if (currency == WalletCurrencyOption.usd) {
       return {'smartWalletId': wallet.id};
     }
+    // POST /latam/mx/kyc/activate takes no request body — it submits the
+    // documents already on the KYC profile to Etherfuse for review.
+    if (currency == WalletCurrencyOption.mxn) {
+      return const {};
+    }
     if (address == null || address.trim().isEmpty) {
       throw const ExampleException(
         'Smart wallet has no on-chain address; cannot start KYC.',
@@ -3671,6 +4322,7 @@ class ProxyApiClient {
     const walletIndex = 0;
     return switch (currency) {
       WalletCurrencyOption.usd => {'smartWalletId': wallet.id},
+      WalletCurrencyOption.mxn => const {},
       WalletCurrencyOption.cad => {
         'cadWalletAddress': address,
         'cadWalletIndex': walletIndex,
@@ -3976,7 +4628,8 @@ class SmartWallet {
       approvalMode: json['approvalMode'] as String?,
       // Defensive: the proxy types these as strings, but upstream may surface
       // the raw user-operation object — stringify rather than risk a cast throw.
-      pendingDeployUserOperation: json['pendingDeployUserOperation']?.toString(),
+      pendingDeployUserOperation: json['pendingDeployUserOperation']
+          ?.toString(),
       deploySigningPayloadHash: json['deploySigningPayloadHash'] as String?,
       createdAt: json['createdAt'] as String?,
     );
@@ -4018,50 +4671,83 @@ class _NigeriaBankWithdrawalDialog extends StatefulWidget {
 class _NigeriaBankWithdrawalDialogState
     extends State<_NigeriaBankWithdrawalDialog> {
   final TextEditingController _accountNumber = TextEditingController();
-  final TextEditingController _bankCode = TextEditingController();
-  final TextEditingController _bankName = TextEditingController();
-  final TextEditingController _holder = TextEditingController();
   final TextEditingController _amount = TextEditingController(text: '100.00');
+  List<NigerianBank> _banks = const [];
+  NigerianBank? _bank;
   String? _verifiedName;
   bool _busy = false;
   String? _error;
 
   @override
+  void initState() {
+    super.initState();
+    _loadBanks();
+  }
+
+  @override
   void dispose() {
     _accountNumber.dispose();
-    _bankCode.dispose();
-    _bankName.dispose();
-    _holder.dispose();
     _amount.dispose();
     super.dispose();
   }
 
-  Future<void> _verify() async {
-    final acct = _accountNumber.text.trim();
-    final code = _bankCode.text.trim();
-    if (acct.length != 10 || code.isEmpty) {
-      setState(() => _error = 'Enter a 10-digit account number and bank code.');
-      return;
-    }
+  /// `GET …/bank-accounts/nigerian-banks` — the name and CBN code must be sent
+  /// verbatim to verify + register, so pick them instead of typing them.
+  Future<void> _loadBanks() async {
     setState(() {
       _busy = true;
       _error = null;
     });
     try {
+      final banks = await widget.client.getNigerianBanks(widget.userId);
+      if (!mounted) {
+        return;
+      }
+      setState(() => _banks = banks);
+    } catch (e) {
+      if (mounted) {
+        setState(() => _error = 'Could not load nigerian-banks: $e');
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _busy = false);
+      }
+    }
+  }
+
+  Future<void> _verify() async {
+    final acct = _accountNumber.text.trim();
+    final bank = _bank;
+    if (acct.length != 10 || bank == null) {
+      setState(
+        () => _error = 'Select a bank and enter a 10-digit account number.',
+      );
+      return;
+    }
+    setState(() {
+      _busy = true;
+      _error = null;
+      _verifiedName = null;
+    });
+    try {
       final v = await widget.client.verifyNigerianAccount(
         userId: widget.userId,
-        bankCode: code,
+        bankCode: bank.code,
         accountNumber: acct,
       );
       if (!mounted) {
         return;
       }
       final name = v['accountName'] ?? v['accountHolderName'];
-      setState(() {
-        _verifiedName = name is String && name.trim().isNotEmpty
-            ? name.trim()
-            : 'Verified (check API response)';
-      });
+      if (name is! String || name.trim().isEmpty) {
+        setState(
+          () => _error =
+              'verify-nigerian-account returned no account holder name; '
+              'registration needs it verbatim.',
+        );
+        return;
+      }
+      setState(() => _verifiedName = name.trim());
     } catch (e) {
       if (mounted) {
         setState(() => _error = e.toString());
@@ -4074,6 +4760,18 @@ class _NigeriaBankWithdrawalDialogState
   }
 
   Future<void> _submit() async {
+    final bank = _bank;
+    final holder = _verifiedName;
+    // Registration requires the exact name returned by verify, so gate on it
+    // rather than letting the user type a name that will be rejected.
+    if (bank == null || holder == null) {
+      setState(
+        () => _error =
+            'Verify the account first — registration needs the '
+            'exact holder name from verify-nigerian-account.',
+      );
+      return;
+    }
     setState(() {
       _busy = true;
       _error = null;
@@ -4083,9 +4781,9 @@ class _NigeriaBankWithdrawalDialogState
         userId: widget.userId,
         body: {
           'accountNumber': _accountNumber.text.trim(),
-          'bankCode': _bankCode.text.trim(),
-          'bankName': _bankName.text.trim(),
-          'accountHolderName': _holder.text.trim(),
+          'bankCode': bank.code,
+          'bankName': bank.name,
+          'accountHolderName': holder,
         },
       );
       final bankAccountId = ProxyApiClient.readBankAccountId(account);
@@ -4122,38 +4820,65 @@ class _NigeriaBankWithdrawalDialogState
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
+            DropdownButtonFormField<NigerianBank>(
+              initialValue: _bank,
+              isExpanded: true,
+              decoration: InputDecoration(
+                labelText: _banks.isEmpty
+                    ? 'Bank (loading nigerian-banks…)'
+                    : 'Bank (name + CBN code)',
+              ),
+              items: [
+                for (final bank in _banks)
+                  DropdownMenuItem(
+                    value: bank,
+                    child: Text(
+                      '${bank.name} · ${bank.code}',
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+              ],
+              onChanged: _busy
+                  ? null
+                  : (value) => setState(() {
+                      _bank = value;
+                      // The verified name belongs to the old bank + number pair.
+                      _verifiedName = null;
+                    }),
+            ),
             TextField(
               controller: _accountNumber,
               decoration: const InputDecoration(
                 labelText: 'Account number (10 digits)',
               ),
               keyboardType: TextInputType.number,
-            ),
-            TextField(
-              controller: _bankCode,
-              decoration: const InputDecoration(labelText: 'Bank code (CBN)'),
-            ),
-            TextField(
-              controller: _bankName,
-              decoration: const InputDecoration(labelText: 'Bank name'),
-            ),
-            TextField(
-              controller: _holder,
-              decoration: const InputDecoration(
-                labelText: 'Account holder name',
-              ),
+              inputFormatters: [
+                FilteringTextInputFormatter.digitsOnly,
+                LengthLimitingTextInputFormatter(10),
+              ],
+              onChanged: (_) {
+                if (_verifiedName != null) {
+                  setState(() => _verifiedName = null);
+                }
+              },
             ),
             TextField(
               controller: _amount,
-              decoration: const InputDecoration(labelText: 'Amount to offramp'),
+              decoration: const InputDecoration(
+                labelText: 'Amount to offramp (decimal, e.g. 100.00)',
+              ),
               keyboardType: const TextInputType.numberWithOptions(
                 decimal: true,
               ),
             ),
-            if (_verifiedName != null) ...[
-              const SizedBox(height: 8),
-              Text('Verified name: $_verifiedName'),
-            ],
+            const SizedBox(height: 8),
+            Text(
+              _verifiedName != null
+                  ? 'Verified holder: $_verifiedName'
+                  : 'Verify to fetch the exact account holder name — '
+                        'registration requires it verbatim.',
+              style: Theme.of(context).textTheme.bodySmall,
+            ),
             if (_error != null) ...[
               const SizedBox(height: 8),
               Text(
@@ -4174,7 +4899,7 @@ class _NigeriaBankWithdrawalDialogState
           child: const Text('Verify'),
         ),
         FilledButton(
-          onPressed: _busy ? null : _submit,
+          onPressed: _busy || _verifiedName == null ? null : _submit,
           child: const Text('Save payout & offramp'),
         ),
       ],
@@ -4451,9 +5176,7 @@ class _IntegrationsPageState extends State<_IntegrationsPage> {
                 title: 'Error',
                 child: Text(
                   _error!,
-                  style: TextStyle(
-                    color: Theme.of(context).colorScheme.error,
-                  ),
+                  style: TextStyle(color: Theme.of(context).colorScheme.error),
                 ),
               ),
             if (_output != null) _LastResponsePanel(value: _output!),
@@ -4723,15 +5446,16 @@ class _IntegrationsPageState extends State<_IntegrationsPage> {
                         _capturePending(
                           json: res,
                           label: 'LATAM cash send',
-                          complete: (signature) => widget.client.submitSignature(
-                            userId: _userId,
-                            workflowId:
-                                (res['signatureRequest']
-                                        as Map?)?['workflowId']
-                                    ?.toString() ??
-                                '',
-                            signature: signature,
-                          ),
+                          complete: (signature) =>
+                              widget.client.submitSignature(
+                                userId: _userId,
+                                workflowId:
+                                    (res['signatureRequest']
+                                            as Map?)?['workflowId']
+                                        ?.toString() ??
+                                    '',
+                                signature: signature,
+                              ),
                         );
                         return res;
                       }),
@@ -4969,15 +5693,16 @@ class _IntegrationsPageState extends State<_IntegrationsPage> {
                         _capturePending(
                           json: res,
                           label: 'Bank payout',
-                          complete: (signature) => widget.client.submitSignature(
-                            userId: _userId,
-                            workflowId:
-                                (res['signatureRequest']
-                                        as Map?)?['workflowId']
-                                    ?.toString() ??
-                                '',
-                            signature: signature,
-                          ),
+                          complete: (signature) =>
+                              widget.client.submitSignature(
+                                userId: _userId,
+                                workflowId:
+                                    (res['signatureRequest']
+                                            as Map?)?['workflowId']
+                                        ?.toString() ??
+                                    '',
+                                signature: signature,
+                              ),
                         );
                         return res;
                       }),

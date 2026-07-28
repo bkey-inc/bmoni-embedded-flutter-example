@@ -35,7 +35,9 @@ dependencies:
   # Use with the CupertinoIcons class for iOS style icons.
   cupertino_icons: ^1.0.8
   bkey_uikit: ^0.0.1
-  bmoni_embedded_sdk: ^0.0.1
+  # ^0.0.1 resolves to <0.0.2 under Dart's caret rules for 0.x, which would
+  # pin the example to the release whose native error-code constants were wrong.
+  bmoni_embedded_sdk: ^0.0.2
   bmoni_embedded_wallets_cards: ^0.0.1
   http: ^1.6.0
   http_parser: ^4.1.2
