@@ -9,8 +9,12 @@ import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
 import 'package:http_parser/http_parser.dart';
 import 'package:image_picker/image_picker.dart';
+import 'package:permission_handler/permission_handler.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:url_launcher/url_launcher.dart';
+import 'package:webview_flutter/webview_flutter.dart';
+import 'package:webview_flutter_android/webview_flutter_android.dart';
+import 'package:webview_flutter_wkwebview/webview_flutter_wkwebview.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -1412,15 +1416,35 @@ class _ExampleHomePageState extends State<ExampleHomePage> {
         await _openKycWizard(const {'status': 'none'});
         return false;
       }
+      // Documented statuses: not_started | in_progress | proposed | approved |
+      // rejected. `proposed` waits on the user finishing the hosted flow.
       final status = (mx['status'] ?? '').toString().toLowerCase();
-      if (status == 'approved') {
-        return true;
+      switch (status) {
+        case 'approved':
+          return true;
+        case 'in_progress':
+          await _showPendingVerificationDialog();
+        case 'proposed':
+          if (!mounted) {
+            return false;
+          }
+          final after = await openMxHostedVerification(
+            context: context,
+            client: _client,
+            userId: _requiredUserId,
+          );
+          if (!mounted) {
+            return false;
+          }
+          setState(() {
+            _message =
+                'Mexico verification status: ${after['status'] ?? 'unknown'}. '
+                'Top up and withdraw unlock once it is approved.';
+            _lastResponse = _prettyJson(after);
+          });
+        default:
+          await _openKycWizard(mx);
       }
-      if (status == 'pending' || status == 'processing') {
-        await _showPendingVerificationDialog();
-        return false;
-      }
-      await _openKycWizard(mx);
       return false;
     }
 
@@ -4130,11 +4154,12 @@ class ProxyApiClient {
   /// Hosted verification launch (`url`, `fields`, auto-submitting `html`) —
   /// required for Mexico KYC approval. Call after activation and whenever
   /// status is `proposed`; the JWT inside expires in ~5 minutes.
-  Future<Map<String, dynamic>> getMxKycLaunch(String userId) {
-    return _request(
+  Future<Map<String, dynamic>> getMxKycLaunch(String userId) async {
+    final json = await _request(
       method: 'GET',
       path: '/v1/users/$userId/latam/mx/kyc/launch/agreements',
     );
+    return _unwrapData(json);
   }
 
   Future<Map<String, dynamic>> startMexicoOnboarding({
@@ -4976,6 +5001,178 @@ class _NigeriaBankWithdrawalDialogState
   }
 }
 
+/// Fetches the Mexico hosted-verification launch payload, shows it in
+/// [HostedVerificationPage], and returns the KYC status once the user closes it.
+/// The payload's JWT lasts ~5 minutes, so it is fetched right before opening.
+Future<Map<String, dynamic>> openMxHostedVerification({
+  required BuildContext context,
+  required ProxyApiClient client,
+  required String userId,
+}) async {
+  final launch = await client.getMxKycLaunch(userId);
+  final html = launch['html'];
+  if (html is! String || html.trim().isEmpty) {
+    throw const ExampleException(
+      'The verification launch payload has no html.',
+    );
+  }
+  if (!context.mounted) {
+    return launch;
+  }
+  await Navigator.of(context).push(
+    MaterialPageRoute<void>(
+      builder: (_) => HostedVerificationPage(
+        html: html,
+        providerHost: Uri.tryParse(launch['url']?.toString() ?? '')?.host,
+      ),
+    ),
+  );
+  return client.getMxKycStatus(userId);
+}
+
+/// Whether [host] is on the same site as [provider]. Missing hosts never match.
+// ponytail: same site = same last two host labels, which covers the provider's
+// subdomains; use a public-suffix list if it ever runs on a ccTLD like .com.mx.
+bool isSameSite(String? host, String? provider) {
+  if (host == null || host.isEmpty || provider == null || provider.isEmpty) {
+    return false;
+  }
+  String site(String h) =>
+      h.toLowerCase().split('.').reversed.take(2).join('.');
+  return site(host) == site(provider);
+}
+
+/// The provider's hosted Mexico verification (agreements, email confirmation,
+/// selfie / liveness, any remaining document). [html] is the auto-submitting
+/// form from `GET …/latam/mx/kyc/launch/agreements`, loaded as-is.
+class HostedVerificationPage extends StatefulWidget {
+  const HostedVerificationPage({
+    super.key,
+    required this.html,
+    this.providerHost,
+  });
+
+  final String html;
+
+  /// Host of the launch `url`. Camera / microphone are granted only to pages
+  /// on the same site, not to anything the provider page links out to.
+  final String? providerHost;
+
+  @override
+  State<HostedVerificationPage> createState() => _HostedVerificationPageState();
+}
+
+class _HostedVerificationPageState extends State<HostedVerificationPage> {
+  late final WebViewController _controller;
+  int _progress = 0;
+  String? _error;
+
+  @override
+  void initState() {
+    super.initState();
+    // Liveness plays the camera feed inline; WKWebView needs that allowed up
+    // front.
+    final params = WebViewPlatform.instance is WebKitWebViewPlatform
+        ? WebKitWebViewControllerCreationParams(
+            allowsInlineMediaPlayback: true,
+            mediaTypesRequiringUserAction: const {},
+          )
+        : const PlatformWebViewControllerCreationParams();
+    _controller =
+        WebViewController.fromPlatformCreationParams(
+            params,
+            onPermissionRequest: _onPermissionRequest,
+          )
+          ..setJavaScriptMode(JavaScriptMode.unrestricted)
+          ..setNavigationDelegate(
+            NavigationDelegate(
+              onProgress: (progress) {
+                if (mounted) {
+                  setState(() => _progress = progress);
+                }
+              },
+              onWebResourceError: (error) {
+                if (mounted && (error.isForMainFrame ?? true)) {
+                  setState(() => _error = error.description);
+                }
+              },
+            ),
+          )
+          ..loadHtmlString(widget.html);
+    final platform = _controller.platform;
+    if (platform is AndroidWebViewController) {
+      platform
+        ..setMediaPlaybackRequiresUserGesture(false)
+        // Android's WebView ignores <input type=file> unless the app answers.
+        ..setOnShowFileSelector(_pickFiles);
+    }
+  }
+
+  /// Camera / microphone for liveness. iOS shows its own prompt (from the
+  /// NS*UsageDescription keys); Android needs the app-level runtime permission
+  /// first, or the page's getUserMedia fails even when granted here.
+  Future<void> _onPermissionRequest(WebViewPermissionRequest request) async {
+    const mediaToPermission = {
+      WebViewPermissionResourceType.camera: Permission.camera,
+      WebViewPermissionResourceType.microphone: Permission.microphone,
+    };
+    final pageHost = Uri.tryParse(await _controller.currentUrl() ?? '')?.host;
+    if (!request.types.every(mediaToPermission.containsKey) ||
+        !isSameSite(pageHost, widget.providerHost)) {
+      await request.deny();
+      return;
+    }
+    if (Platform.isAndroid) {
+      final statuses = await [
+        for (final type in request.types) mediaToPermission[type]!,
+      ].request();
+      if (!statuses.values.every((status) => status.isGranted)) {
+        await request.deny();
+        return;
+      }
+    }
+    await request.grant();
+  }
+
+  // ponytail: images only, via the image_picker already used for KYC uploads.
+  // Add file_picker if the provider starts asking for PDFs here.
+  Future<List<String>> _pickFiles(FileSelectorParams params) async {
+    final picker = ImagePicker();
+    if (params.mode == FileSelectorMode.openMultiple &&
+        !params.isCaptureEnabled) {
+      final files = await picker.pickMultiImage();
+      return [for (final f in files) Uri.file(f.path).toString()];
+    }
+    final file = await picker.pickImage(
+      source: params.isCaptureEnabled
+          ? ImageSource.camera
+          : ImageSource.gallery,
+    );
+    return file == null ? const [] : [Uri.file(file.path).toString()];
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('Identity verification')),
+      body: Column(
+        children: [
+          if (_progress < 100) LinearProgressIndicator(value: _progress / 100),
+          if (_error != null)
+            Padding(
+              padding: const EdgeInsets.all(16),
+              child: Text(
+                'Could not load the verification page: $_error',
+                style: TextStyle(color: Theme.of(context).colorScheme.error),
+              ),
+            ),
+          Expanded(child: WebViewWidget(controller: _controller)),
+        ],
+      ),
+    );
+  }
+}
+
 /// Demonstrates the regional / provider integrations that are not part of the
 /// core onboarding + top-up + withdraw + swap home flow: swap quote (#63),
 /// EU SEPA (#64), LATAM cash (#65), LATAM Mexico (#66), US VBA (#67) and
@@ -5692,7 +5889,13 @@ class _IntegrationsPageState extends State<_IntegrationsPage> {
               OutlinedButton(
                 onPressed: _busy
                     ? null
-                    : () => _run(() => widget.client.getMxKycLaunch(_userId)),
+                    : () => _run(
+                        () => openMxHostedVerification(
+                          context: context,
+                          client: widget.client,
+                          userId: _userId,
+                        ),
+                      ),
                 child: const Text('Launch verification'),
               ),
               OutlinedButton(
@@ -5717,8 +5920,8 @@ class _IntegrationsPageState extends State<_IntegrationsPage> {
           const SizedBox(height: 8),
           Text(
             'While status is proposed, the user must finish the hosted '
-            'verification: load the returned html into a WebView or browser '
-            '(it auto-submits; the token expires in ~5 min).',
+            'verification. Launch opens it in a WebView and shows the status '
+            'once it is closed.',
             style: Theme.of(context).textTheme.bodySmall,
           ),
           const Divider(height: 24),

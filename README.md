@@ -143,8 +143,14 @@ Every request sends the partner key as an **`x-api-key`** header. Use the
 
 - **Photos** — declares `NSPhotoLibraryUsageDescription` (iOS) and
   `READ_MEDIA_IMAGES` / `READ_EXTERNAL_STORAGE` (Android, max SDK 32) so gallery
-  picks work for KYC document uploads. Add `NSCameraUsageDescription` only if you
-  switch to camera capture.
+  picks work for KYC document uploads.
+- **Mexico hosted verification** — when `latam/mx/kyc/status` is `proposed`, the
+  app fetches `kyc/launch/agreements` and loads its `html` in a WebView
+  (`webview_flutter`). The selfie / liveness step needs the camera:
+  `NSCameraUsageDescription` / `NSMicrophoneUsageDescription` on iOS, and
+  `CAMERA` / `RECORD_AUDIO` requested at runtime on Android
+  (`permission_handler`). Camera is granted only to pages on the provider's
+  site. File inputs on Android use `image_picker` (images only).
 - **`create-managed`** runs prepare + deploy + owner-registration server-side,
   but the client must first prove control of the embedded owner address by
   signing the owner-proof challenge.

@@ -171,6 +171,15 @@ void main() {
     expect(body, contains('name="type"\r\n\r\nselfie'));
   });
 
+  test('camera is granted only on the provider site', () {
+    expect(isSameSite('app.etherfuse.com', 'devnet.etherfuse.com'), isTrue);
+    expect(isSameSite('ETHERFUSE.com', 'etherfuse.com'), isTrue);
+    expect(isSameSite('evil.com', 'etherfuse.com'), isFalse);
+    expect(isSameSite('etherfuse.com.evil.io', 'etherfuse.com'), isFalse);
+    expect(isSameSite('', 'etherfuse.com'), isFalse);
+    expect(isSameSite('etherfuse.com', null), isFalse);
+  });
+
   test('MXN wallets use MEXe', () {
     expect(WalletCurrencyOption.mxn.smartWalletCurrency, 'MEXe');
     expect(WalletCurrencyOption.cad.sumsubLevelName, isNull);
