@@ -9,8 +9,8 @@ void main() {
   group('parseSupportedCurrencies', () {
     test('reads a plain array', () {
       expect(
-        ProxyApiClient.parseSupportedCurrencies(['USDB', 'CNGN', 'MXNe']),
-        ['USDB', 'CNGN', 'MXNe'],
+        ProxyApiClient.parseSupportedCurrencies(['USDB', 'CNGN', 'MEXe']),
+        ['USDB', 'CNGN', 'MEXe'],
       );
     });
 

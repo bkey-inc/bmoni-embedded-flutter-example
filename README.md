@@ -55,13 +55,13 @@ A single guided flow, end to end:
 | 💳 Provision a managed smart wallet | `owner-proof-challenges` → sign EIP-191 → `create-managed` |
 | 🪪 Complete KYC | options · occupations · ID + PoA + biometric uploads · `readiness` · `activate` |
 | 🚦 Activate the rail | `start-usa` / `start-canada` / `start-monerium` / `start-nigeria` / `latam/mx/kyc/activate` |
-| 💰 Top up | crypto (`deposit/supported-assets` → `deposit/wallet`) or bank rail (USD / NGN / EUR virtual bank account) |
+| 💰 Top up | crypto (`deposit/supported-assets` → `deposit/wallet`) or bank rail (USD VBA via `start-usa`; NGN / EUR VBA routed via `smart-wallets/:id/onramp/vba/{nigeria,eu}`; MXN CLABE via `deposit-accounts/MXN`) |
 | 🏦 Withdraw | Nigeria bank offramp → proposal → sign with the owner key |
 | 🔁 Swap | `exchange/convert` rate preview |
 | 🧩 Integrations | the regional/provider ramps (below) |
 
 Currencies: **USD** (`USDB`), **CAD** (`CADC`), **EUR** (`EURe`), **NGN** (`CNGN`),
-**MXN** (`MXNe`). The picker is filtered by
+**MXN** (`MEXe`). The picker is filtered by
 `GET /v1/smart-wallets/supported-currencies`, so it follows the API rather than a
 hardcoded list.
 
@@ -102,10 +102,9 @@ endpoint.
 | 🔁 **Swap quote** | `GET exchange/rate/:from/:to` · `POST exchange/quote` |
 | 🇪🇺 **EU SEPA / Monerium** | `POST eu/kyc` · `eu/orders/prepare` · `eu/orders/complete` · `eu/files` |
 | 💵 **LATAM cash** (Pago46) | `POST latam/cash/orders/{fund,send}` · `GET latam/cash/orders[/:id]` |
-| 🇲🇽 **LATAM Mexico** (Etherfuse) | `latam/mx/kyc/{activate,status,bank-account}` · `latam/mx/quote` · `latam/mx/orders[/:id]` |
+| 🇲🇽 **LATAM Mexico** (Etherfuse) | `latam/mx/kyc/{activate,status}` · `POST latam/mx/quote` (offramp) · `GET latam/mx/orders/:id` |
 | 🇺🇸 **USD virtual bank account** | `GET kyc/usd-readiness` · `POST onboarding/start-usa` · `GET vba/usd` |
 | 🏧 **Bank payouts** (Fin) | `GET payouts/{countries,banks,bank-branches}` · `POST payouts/validate-account` · `POST payouts` |
-| 💳 **Payment wallet-selection** | `POST payment/select-wallet` |
 
 Signatures complete via `POST wallets/submit-signature` (or `eu/orders/complete`
 for EU orders).
@@ -148,11 +147,14 @@ Every request sends the partner key as an **`x-api-key`** header. Use the
   but the client must first prove control of the embedded owner address by
   signing the owner-proof challenge.
 - **Global KYC path** — USD, EUR and MXN require a biometric selfie
-  (`POST …/kyc/documents/biometric`) and a `sumsubLevelName` at activation. CAD
-  and NGN must omit both; the wizard enforces this per currency.
+  (`POST …/kyc/documents/biometric`, file field `selfie`) and liveness
+  (`sumsubLevelName: id-and-liveness`) at activation. NGN activates with
+  `id-only`; CAD routes to PayTrie and sends no `sumsubLevelName`.
 - **MXN** activates through Etherfuse (`POST …/latam/mx/kyc/activate`, no body)
   and reports status from `GET …/latam/mx/kyc/status`, not `onboarding/status`.
-  Funding runs `latam/mx/quote` → `latam/mx/orders` under Integrations.
+  Onramp is deposit-driven: MXN sent by SPEI to the CLABE from
+  `GET …/deposit-accounts/MXN` credits the wallet. Offramp runs
+  `latam/mx/quote` → sign → `wallets/submit-signature`.
 - **Nigerian withdrawal** — the bank list comes from
   `GET …/bank-accounts/nigerian-banks`, and registration requires the exact
   holder name returned by `verify-nigerian-account`, so **Verify** gates
