@@ -1128,7 +1128,7 @@ class _ExampleHomePageState extends State<ExampleHomePage> {
     }
     setState(() {
       _message =
-          'Send MXN by SPEI to the CLABE below — it onramps to this wallet '
+          'Send MXN by SPEI to the CLABE below. It onramps to this wallet '
           'automatically.';
       _lastResponse = _prettyJson(accounts ?? const <String, dynamic>{});
     });
@@ -2863,6 +2863,9 @@ class _ExampleHomePageState extends State<ExampleHomePage> {
           client: _client,
           userId: userId,
           smartWalletId: smartWalletId,
+          smartWalletAddress:
+              _requiredSmartWallet.smartAccountAddress ??
+              _requiredSmartWallet.walletAddress,
         ),
       ),
     );
@@ -3569,6 +3572,20 @@ class ProxyApiClient {
     return _unwrapData(json);
   }
 
+  /// Smart-wallet-scoped USD VBA provisioning (Graph Finance). Same account as
+  /// `start-usa`, keyed on the wallet in the path; takes no body. Idempotent.
+  Future<Map<String, dynamic>> provisionSmartWalletUsdVba({
+    required String userId,
+    required String smartWalletId,
+  }) async {
+    final json = await _request(
+      method: 'POST',
+      path:
+          '/v1/users/$userId/smart-wallets/$smartWalletId/onramp/vba/usd/provision',
+    );
+    return _unwrapData(json);
+  }
+
   Future<Map<String, dynamic>> getUsdVba(String userId) async {
     final json = await _request(
       method: 'GET',
@@ -4053,6 +4070,31 @@ class ProxyApiClient {
     );
   }
 
+  /// Bank payout into a LATAM country (the USD → MXN / CLP / COP corridor),
+  /// funded from any stablecoin wallet. Returns a quote plus a
+  /// `signatureRequest`; after submitting it, poll [getWorkflowStatus] — there
+  /// is no order record for this payout.
+  Future<Map<String, dynamic>> createLatamForeignPayout({
+    required String userId,
+    required String smartWalletId,
+    required String usdcAmount,
+    required String targetCountry,
+    required String targetCurrency,
+    required String description,
+  }) {
+    return _request(
+      method: 'POST',
+      path: '/v1/users/$userId/latam/cash/payouts/foreign',
+      body: {
+        'smartWalletId': smartWalletId,
+        'usdcAmount': usdcAmount,
+        'targetCountry': targetCountry,
+        'targetCurrency': targetCurrency,
+        'description': description,
+      },
+    );
+  }
+
   Future<Map<String, dynamic>> getCashOrder({
     required String userId,
     required String orderId,
@@ -4083,6 +4125,48 @@ class ProxyApiClient {
       path: '/v1/users/$userId/latam/mx/kyc/status',
     );
     return _unwrapData(json);
+  }
+
+  /// Hosted verification launch (`url`, `fields`, auto-submitting `html`) —
+  /// required for Mexico KYC approval. Call after activation and whenever
+  /// status is `proposed`; the JWT inside expires in ~5 minutes.
+  Future<Map<String, dynamic>> getMxKycLaunch(String userId) {
+    return _request(
+      method: 'GET',
+      path: '/v1/users/$userId/latam/mx/kyc/launch/agreements',
+    );
+  }
+
+  Future<Map<String, dynamic>> startMexicoOnboarding({
+    required String userId,
+    required String mxnWalletAddress,
+    int mxnWalletIndex = 0,
+  }) {
+    return _request(
+      method: 'POST',
+      path: '/v1/users/$userId/onboarding/start-mexico',
+      body: {
+        'mxnWalletAddress': mxnWalletAddress,
+        'mxnWalletIndex': mxnWalletIndex,
+      },
+    );
+  }
+
+  /// Whether the MXN wallet still holds the retired MXNe token (`eligible`).
+  Future<Map<String, dynamic>> getMxneMigrationStatus(String userId) {
+    return _request(
+      method: 'GET',
+      path: '/v1/users/$userId/latam/mx/mxne-migration/status',
+    );
+  }
+
+  /// Builds the 1:1 MXNe → MEXe swap and returns its `signatureRequest`.
+  /// Errors 400 when there is no MXNe to migrate.
+  Future<Map<String, dynamic>> prepareMxneMigration(String userId) {
+    return _request(
+      method: 'POST',
+      path: '/v1/users/$userId/latam/mx/mxne-migration/prepare',
+    );
   }
 
   /// MXN offramp quote. Returns a `signatureRequest` to sign and submit via
@@ -4223,6 +4307,19 @@ class ProxyApiClient {
       method: 'POST',
       path: '/v1/users/$userId/wallets/submit-signature',
       body: {'workflowId': workflowId, 'signature': signature},
+    );
+  }
+
+  /// Settlement of a submitted signature (`status`, `isTerminal`, `result` /
+  /// `error`). The only way to see the MXN offramp, MXNe migration and LATAM
+  /// payouts settle; poll every ~5s until `isTerminal`.
+  Future<Map<String, dynamic>> getWorkflowStatus({
+    required String userId,
+    required String workflowId,
+  }) {
+    return _request(
+      method: 'GET',
+      path: '/v1/users/$userId/wallets/workflows/$workflowId',
     );
   }
 
@@ -4881,24 +4978,27 @@ class _NigeriaBankWithdrawalDialogState
 
 /// Demonstrates the regional / provider integrations that are not part of the
 /// core onboarding + top-up + withdraw + swap home flow: swap quote (#63),
-/// EU SEPA (#64), LATAM cash (#65), LATAM Mexico (#66), US VBA (#67),
-/// bank payouts (#68) and payment wallet-selection (#69).
+/// EU SEPA (#64), LATAM cash (#65), LATAM Mexico (#66), US VBA (#67) and
+/// bank payouts (#68).
 ///
 /// Each action calls the proxy directly and dumps the raw JSON response.
 /// Flows that return a `signatureRequest` (or `messageToSign`) expose a
 /// "Sign & submit" button that signs `hashToSign` with
 /// [BmoniEmbeddedSdk.signTransactionHash] and completes via the matching
-/// endpoint (`eu/orders/complete` for EU, `wallets/submit-signature` otherwise).
+/// endpoint (`eu/orders/complete` for EU, `wallets/submit-signature` otherwise),
+/// then settlement is polled via `GET wallets/workflows/{workflowId}`.
 class _IntegrationsPage extends StatefulWidget {
   const _IntegrationsPage({
     required this.client,
     required this.userId,
     required this.smartWalletId,
+    this.smartWalletAddress,
   });
 
   final ProxyApiClient client;
   final String userId;
   final String smartWalletId;
+  final String? smartWalletAddress;
 
   @override
   State<_IntegrationsPage> createState() => _IntegrationsPageState();
@@ -4914,6 +5014,9 @@ class _IntegrationsPageState extends State<_IntegrationsPage> {
   String? _pendingHash;
   Future<Map<String, dynamic>> Function(String signature)? _pendingComplete;
   String? _pendingLabel;
+
+  // Settlement of the last submitted signature
+  final _workflowId = TextEditingController();
 
   // Swap quote (#63)
   final _swapFrom = TextEditingController(text: 'USDB');
@@ -4936,6 +5039,9 @@ class _IntegrationsPageState extends State<_IntegrationsPage> {
   final _cashCurrency = TextEditingController(text: 'MXN');
   final _cashDescription = TextEditingController(text: 'Example cash order');
   final _cashOrderId = TextEditingController();
+  final _fxUsdcAmount = TextEditingController(text: '25');
+  final _fxCountry = TextEditingController(text: 'MX');
+  final _fxCurrency = TextEditingController(text: 'MXN');
 
   // LATAM Mexico (#66)
   final _mxAmount = TextEditingController(text: '500');
@@ -4952,6 +5058,7 @@ class _IntegrationsPageState extends State<_IntegrationsPage> {
   @override
   void dispose() {
     for (final c in [
+      _workflowId,
       _swapFrom,
       _swapTo,
       _swapAmount,
@@ -4968,6 +5075,9 @@ class _IntegrationsPageState extends State<_IntegrationsPage> {
       _cashCurrency,
       _cashDescription,
       _cashOrderId,
+      _fxUsdcAmount,
+      _fxCountry,
+      _fxCurrency,
       _mxAmount,
       _mxOrderId,
       _poCountry,
@@ -5042,9 +5152,24 @@ class _IntegrationsPageState extends State<_IntegrationsPage> {
     });
   }
 
+  /// [_capturePending] for flows completed via `wallets/submit-signature`.
+  void _captureForSubmit(Map<String, dynamic> json, String label) {
+    _capturePending(
+      json: json,
+      label: label,
+      complete: (signature) => widget.client.submitSignature(
+        userId: _userId,
+        workflowId:
+            (json['signatureRequest'] as Map?)?['workflowId']?.toString() ?? '',
+        signature: signature,
+      ),
+    );
+  }
+
   Future<void> _signAndSubmit() async {
     final hash = _pendingHash;
     final complete = _pendingComplete;
+    final workflowId = _pendingWorkflowId;
     if (hash == null || complete == null) {
       return;
     }
@@ -5059,6 +5184,10 @@ class _IntegrationsPageState extends State<_IntegrationsPage> {
       );
       final result = await complete(signature);
       setState(() {
+        // Pre-fill the settlement check with the workflow just submitted.
+        if (workflowId != null) {
+          _workflowId.text = workflowId;
+        }
         _pendingWorkflowId = null;
         _pendingHash = null;
         _pendingComplete = null;
@@ -5128,6 +5257,7 @@ class _IntegrationsPageState extends State<_IntegrationsPage> {
                   ],
                 ),
               ),
+            _buildWorkflowSection(),
             _buildSwapSection(),
             _buildUsVbaSection(),
             _buildEuSection(),
@@ -5150,6 +5280,36 @@ class _IntegrationsPageState extends State<_IntegrationsPage> {
               ),
           ],
         ),
+      ),
+    );
+  }
+
+  Widget _buildWorkflowSection() {
+    return _SectionCard(
+      title: 'Workflow settlement',
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Text(
+            'After Sign & submit, poll until isTerminal: COMPLETED carries '
+            'result, any other terminal status carries error.',
+            style: Theme.of(context).textTheme.bodySmall,
+          ),
+          const SizedBox(height: 12),
+          _TextInput(controller: _workflowId, label: 'Workflow id'),
+          const SizedBox(height: 8),
+          OutlinedButton(
+            onPressed: _busy
+                ? null
+                : () => _run(
+                    () => widget.client.getWorkflowStatus(
+                      userId: _userId,
+                      workflowId: _workflowId.text.trim(),
+                    ),
+                  ),
+            child: const Text('GET workflow status'),
+          ),
+        ],
       ),
     );
   }
@@ -5216,7 +5376,8 @@ class _IntegrationsPageState extends State<_IntegrationsPage> {
         children: [
           Text(
             'Readiness (GET /kyc/usd-readiness) → provision '
-            '(POST /onboarding/start-usa) → status (GET /vba/usd).',
+            '(POST /onboarding/start-usa, or the smart-wallet route '
+            '…/onramp/vba/usd/provision) → status (GET /vba/usd).',
             style: Theme.of(context).textTheme.bodySmall,
           ),
           const SizedBox(height: 12),
@@ -5240,6 +5401,17 @@ class _IntegrationsPageState extends State<_IntegrationsPage> {
                         ),
                       ),
                 child: const Text('Provision'),
+              ),
+              OutlinedButton(
+                onPressed: _busy
+                    ? null
+                    : () => _run(
+                        () => widget.client.provisionSmartWalletUsdVba(
+                          userId: _userId,
+                          smartWalletId: _walletId,
+                        ),
+                      ),
+                child: const Text('Provision (wallet route)'),
               ),
               OutlinedButton(
                 onPressed: _busy
@@ -5448,6 +5620,48 @@ class _IntegrationsPageState extends State<_IntegrationsPage> {
                   ),
             child: const Text('GET order'),
           ),
+          const Divider(height: 24),
+          Text(
+            'Bank payout (USD → MXN / CLP / COP): swaps this wallet into USDC '
+            'and pays the equivalent fiat. No sender-side Mexico KYC; settles '
+            'through the workflow, with no order record.',
+            style: Theme.of(context).textTheme.bodySmall,
+          ),
+          const SizedBox(height: 12),
+          _TextInput(
+            controller: _fxUsdcAmount,
+            label: 'USDC amount',
+            keyboardType: TextInputType.number,
+          ),
+          const SizedBox(height: 12),
+          _TwoColumnFields(
+            first: _TextInput(
+              controller: _fxCountry,
+              label: 'Target country (alpha-2)',
+            ),
+            second: _TextInput(
+              controller: _fxCurrency,
+              label: 'Target currency',
+            ),
+          ),
+          const SizedBox(height: 12),
+          FilledButton(
+            onPressed: _busy
+                ? null
+                : () => _run(() async {
+                    final res = await widget.client.createLatamForeignPayout(
+                      userId: _userId,
+                      smartWalletId: _walletId,
+                      usdcAmount: _fxUsdcAmount.text.trim(),
+                      targetCountry: _fxCountry.text.trim().toUpperCase(),
+                      targetCurrency: _fxCurrency.text.trim().toUpperCase(),
+                      description: _cashDescription.text.trim(),
+                    );
+                    _captureForSubmit(res, 'LATAM bank payout');
+                    return res;
+                  }),
+            child: const Text('POST payouts/foreign'),
+          ),
         ],
       ),
     );
@@ -5475,7 +5689,37 @@ class _IntegrationsPageState extends State<_IntegrationsPage> {
                     : () => _run(() => widget.client.getMxKycStatus(_userId)),
                 child: const Text('KYC status'),
               ),
+              OutlinedButton(
+                onPressed: _busy
+                    ? null
+                    : () => _run(() => widget.client.getMxKycLaunch(_userId)),
+                child: const Text('Launch verification'),
+              ),
+              OutlinedButton(
+                onPressed: _busy
+                    ? null
+                    : () => _run(() {
+                        final address = widget.smartWalletAddress?.trim();
+                        if (address == null || address.isEmpty) {
+                          throw const ExampleException(
+                            'Smart wallet has no on-chain address.',
+                          );
+                        }
+                        return widget.client.startMexicoOnboarding(
+                          userId: _userId,
+                          mxnWalletAddress: address,
+                        );
+                      }),
+                child: const Text('Start Mexico onboarding'),
+              ),
             ],
+          ),
+          const SizedBox(height: 8),
+          Text(
+            'While status is proposed, the user must finish the hosted '
+            'verification: load the returned html into a WebView or browser '
+            '(it auto-submits; the token expires in ~5 min).',
+            style: Theme.of(context).textTheme.bodySmall,
           ),
           const Divider(height: 24),
           Text(
@@ -5530,6 +5774,39 @@ class _IntegrationsPageState extends State<_IntegrationsPage> {
                     ),
                   ),
             child: const Text('GET order'),
+          ),
+          const Divider(height: 24),
+          Text(
+            'Legacy MXNe → MEXe: if status reports eligible, prepare the 1:1 '
+            'swap (no fee) and sign it.',
+            style: Theme.of(context).textTheme.bodySmall,
+          ),
+          const SizedBox(height: 12),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              OutlinedButton(
+                onPressed: _busy
+                    ? null
+                    : () => _run(
+                        () => widget.client.getMxneMigrationStatus(_userId),
+                      ),
+                child: const Text('Migration status'),
+              ),
+              FilledButton(
+                onPressed: _busy
+                    ? null
+                    : () => _run(() async {
+                        final res = await widget.client.prepareMxneMigration(
+                          _userId,
+                        );
+                        _captureForSubmit(res, 'MXNe → MEXe migration');
+                        return res;
+                      }),
+                child: const Text('Prepare migration'),
+              ),
+            ],
           ),
         ],
       ),

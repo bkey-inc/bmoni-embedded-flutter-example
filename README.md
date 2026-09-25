@@ -101,13 +101,15 @@ endpoint.
 | :--- | :--- |
 | 🔁 **Swap quote** | `GET exchange/rate/:from/:to` · `POST exchange/quote` |
 | 🇪🇺 **EU SEPA / Monerium** | `POST eu/kyc` · `eu/orders/prepare` · `eu/orders/complete` · `eu/files` |
-| 💵 **LATAM cash** (Pago46) | `POST latam/cash/orders/{fund,send}` · `GET latam/cash/orders[/:id]` |
-| 🇲🇽 **LATAM Mexico** (Etherfuse) | `latam/mx/kyc/{activate,status}` · `POST latam/mx/quote` (offramp) · `GET latam/mx/orders/:id` |
-| 🇺🇸 **USD virtual bank account** | `GET kyc/usd-readiness` · `POST onboarding/start-usa` · `GET vba/usd` |
+| 💵 **LATAM cash** (Pago46) | `POST latam/cash/orders/{fund,send}` · `GET latam/cash/orders[/:id]` · `POST latam/cash/payouts/foreign` (USD → MXN / CLP / COP bank payout) |
+| 🇲🇽 **LATAM Mexico** (Etherfuse) | `latam/mx/kyc/{activate,status,launch/agreements}` · `POST onboarding/start-mexico` · `POST latam/mx/quote` (offramp) · `GET latam/mx/orders/:id` · `latam/mx/mxne-migration/{status,prepare}` |
+| 🇺🇸 **USD virtual bank account** | `GET kyc/usd-readiness` · `POST onboarding/start-usa` or `POST smart-wallets/:id/onramp/vba/usd/provision` · `GET vba/usd` |
 | 🏧 **Bank payouts** (Fin) | `GET payouts/{countries,banks,bank-branches}` · `POST payouts/validate-account` · `POST payouts` |
 
 Signatures complete via `POST wallets/submit-signature` (or `eu/orders/complete`
-for EU orders).
+for EU orders), then settle via `GET wallets/workflows/:workflowId`: poll until
+`isTerminal`. It is the only settlement signal for the MXN offramp, the MXNe
+migration and LATAM payouts.
 
 ---
 
