@@ -5054,8 +5054,9 @@ class HostedVerificationPage extends StatefulWidget {
 
   final String html;
 
-  /// Host of the launch `url`. Camera / microphone are granted only to pages
-  /// on the same site, not to anything the provider page links out to.
+  /// Host of the launch `url`. Pages on that site get camera / microphone
+  /// without asking; any other site (e.g. a vendor the provider hands off to)
+  /// needs the user's explicit OK.
   final String? providerHost;
 
   @override
@@ -5116,9 +5117,13 @@ class _HostedVerificationPageState extends State<HostedVerificationPage> {
       WebViewPermissionResourceType.camera: Permission.camera,
       WebViewPermissionResourceType.microphone: Permission.microphone,
     };
+    if (!request.types.every(mediaToPermission.containsKey)) {
+      await request.deny();
+      return;
+    }
     final pageHost = Uri.tryParse(await _controller.currentUrl() ?? '')?.host;
-    if (!request.types.every(mediaToPermission.containsKey) ||
-        !isSameSite(pageHost, widget.providerHost)) {
+    if (!isSameSite(pageHost, widget.providerHost) &&
+        !await _confirmOffSiteMedia(pageHost)) {
       await request.deny();
       return;
     }
@@ -5132,6 +5137,33 @@ class _HostedVerificationPageState extends State<HostedVerificationPage> {
       }
     }
     await request.grant();
+  }
+
+  Future<bool> _confirmOffSiteMedia(String? host) async {
+    if (!mounted) {
+      return false;
+    }
+    final allowed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Allow camera access?'),
+        content: Text(
+          '${host == null || host.isEmpty ? 'This page' : host} is asking to '
+          'use your camera. It is not the verification provider.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text("Don't allow"),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Allow'),
+          ),
+        ],
+      ),
+    );
+    return allowed ?? false;
   }
 
   // ponytail: images only, via the image_picker already used for KYC uploads.

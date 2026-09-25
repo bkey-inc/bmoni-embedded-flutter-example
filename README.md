@@ -149,8 +149,8 @@ Every request sends the partner key as an **`x-api-key`** header. Use the
   (`webview_flutter`). The selfie / liveness step needs the camera:
   `NSCameraUsageDescription` / `NSMicrophoneUsageDescription` on iOS, and
   `CAMERA` / `RECORD_AUDIO` requested at runtime on Android
-  (`permission_handler`). Camera is granted only to pages on the provider's
-  site. File inputs on Android use `image_picker` (images only).
+  (`permission_handler`). Pages on the provider's site get the camera directly;
+  any other site needs the user's explicit OK. File inputs on Android use `image_picker` (images only).
 - **`create-managed`** runs prepare + deploy + owner-registration server-side,
   but the client must first prove control of the embedded owner address by
   signing the owner-proof challenge.

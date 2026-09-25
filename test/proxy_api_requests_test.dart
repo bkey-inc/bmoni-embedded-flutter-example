@@ -171,7 +171,7 @@ void main() {
     expect(body, contains('name="type"\r\n\r\nselfie'));
   });
 
-  test('camera is granted only on the provider site', () {
+  test('camera skips the prompt only on the provider site', () {
     expect(isSameSite('app.etherfuse.com', 'devnet.etherfuse.com'), isTrue);
     expect(isSameSite('ETHERFUSE.com', 'etherfuse.com'), isTrue);
     expect(isSameSite('evil.com', 'etherfuse.com'), isFalse);
